@@ -1,0 +1,83 @@
+/*
+ * Orangelink flash partition layout for nRF52840 (1 MB internal).
+ * SPDX-License-Identifier: GPL-2.0-only
+ *
+ * Included by BOTH the application overlay and the MCUboot image overlay, since
+ * the two builds must agree on the layout exactly.
+ *
+ * WHY THIS FILE EXISTS
+ * The xiao_ble board pulls in nrf52840_partition_uf2_sdv7.dtsi, which targets the
+ * Adafruit UF2 bootloader and reserves 156 KB at the bottom of flash for a Nordic
+ * SoftDevice s140 blob. We use Zephyr's own SoftDevice Controller linked into the
+ * application, so that reservation is dead space, and MCUboot replaces the UF2
+ * bootloader entirely (UF2 performs no signature verification -- see
+ * docs/DECISION-xiao-nrf52840.md section 3.3).
+ *
+ * The board layout is therefore deleted and replaced:
+ *
+ *   board default                      this layout
+ *   -----------------------------      ---------------------------------
+ *   0x00000 SoftDevice   156 KB        0x00000 MCUboot            48 KB
+ *   0x27000 Application  788 KB        0x0C000 slot0 (primary)   440 KB
+ *   0xEC000 Storage       32 KB        0x7A000 slot1 (secondary) 440 KB
+ *   0xF4000 UF2           48 KB        0xE8000 storage (NVS)      32 KB
+ *                                      0xF0000 unallocated        64 KB
+ *
+ * The application measures ~178 KB, so a 440 KB slot leaves roughly 60% headroom
+ * and the 64 KB tail can be reallocated later.
+ *
+ * NOTE ON FLASHING: replacing the UF2 bootloader means USB drag-and-drop
+ * flashing no longer works and an SWD probe is required. Builds without MCUboot
+ * keep the board's UF2 layout and stay USB-flashable -- see README.md.
+ */
+
+/*
+ * Deliberately NO `chosen { zephyr,code-partition = ... }` here.
+ *
+ * This file is shared by the application and MCUboot images. Setting
+ * code-partition to slot0 leaked into the bootloader and gave MCUboot
+ * CONFIG_FLASH_LOAD_OFFSET=0xc000 / LOAD_SIZE=0x6e000, splitting its image
+ * across 0x0 and slot0 -- it would not have booted.
+ *
+ * Leave placement to the tooling: MCUboot defaults to boot_partition, and
+ * sysbuild derives the application's load offset from slot0. Verify with
+ * `west build` then check the link addresses, not just that the build passed.
+ */
+
+&flash0 {
+	partitions {
+		/* Remove the board's UF2/SoftDevice layout. Addresses come from
+		 * zephyr/dts/vendor/nordic/nrf52840_partition_uf2_sdv7.dtsi.
+		 */
+		/delete-node/ partition@0;
+		/delete-node/ partition@27000;
+		/delete-node/ partition@ec000;
+		/delete-node/ partition@f4000;
+
+		boot_partition: partition@0 {
+			label = "mcuboot";
+			reg = <0x00000000 0x0000C000>;   /*  48 KB */
+		};
+
+		slot0_partition: partition@c000 {
+			label = "image-0";
+			reg = <0x0000C000 0x0006E000>;   /* 440 KB */
+		};
+
+		slot1_partition: partition@7a000 {
+			label = "image-1";
+			reg = <0x0007A000 0x0006E000>;   /* 440 KB */
+		};
+
+		/* NVS backing store for the Settings subsystem, replacing the legacy
+		 * 2-page FDS area. Three sectors minimum so NVS has a spare to garbage
+		 * collect into; 8 sectors here gives real margin.
+		 */
+		storage_partition: partition@e8000 {
+			label = "storage";
+			reg = <0x000E8000 0x00008000>;   /*  32 KB */
+		};
+
+		/* 0xF0000 - 0x100000 (64 KB) deliberately unallocated. */
+	};
+};

@@ -1,0 +1,245 @@
+/*
+ * Orangelink -- sub-GHz to BLE bridge (RileyLink-compatible).
+ * SPDX-License-Identifier: GPL-2.0-only
+ *
+ * Phase 2 milestone: BLE bring-up. Advertising and the IPS GATT service match
+ * the legacy firmware exactly (docs/gatt-service-spec.md). The APS command
+ * handler, sub-GHz state machine and RFM69 driver are not wired up yet.
+ */
+
+#include <zephyr/kernel.h>
+#include <zephyr/bluetooth/bluetooth.h>
+#include <zephyr/bluetooth/conn.h>
+#include <zephyr/bluetooth/gap.h>
+#include <zephyr/bluetooth/hci.h>
+#include <zephyr/bluetooth/hci_types.h>
+#include <zephyr/bluetooth/uuid.h>
+#include <zephyr/logging/log.h>
+#include <zephyr/sys/byteorder.h>
+#include <string.h>
+
+#include "ble/ips.h"
+
+LOG_MODULE_REGISTER(main, CONFIG_ORANGELINK_LOG_LEVEL);
+
+/* ------------------------------------------------------------------------- *
+ * Advertising -- legacy parameters
+ *
+ *   BLE_ADV_INTERVAL 480 units x 0.625 ms = 300 ms
+ *     (the legacy source comment claims 187.5 ms and is simply wrong)
+ *   BLE_ADV_DURATION 0 = advertise forever
+ * ------------------------------------------------------------------------- */
+
+#define ORANGELINK_ADV_INTERVAL 480
+
+/* Default names from boards/bd_xh601_config.h and bd_xh_5102_config.h.
+ * Overridden at boot by the persisted Custom Name once settings are wired up.
+ */
+#define ORANGELINK_DEFAULT_NAME CONFIG_BT_DEVICE_NAME
+
+/* 0235733b-99c5-4197-b856-69219c2a3845 -- advertised as a complete 128-bit list,
+ * matching the legacy advdata.uuids_complete.
+ */
+static const struct bt_data adv_data[] = {
+	BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
+	BT_DATA_BYTES(BT_DATA_UUID128_ALL,
+		      BT_UUID_128_ENCODE(0x0235733b, 0x99c5, 0x4197,
+					 0xb856, 0x69219c2a3845)),
+};
+
+/*
+ * DEVIATION: the name goes in the scan response, not the advertising payload.
+ *
+ * The legacy code asked for BLE_ADVDATA_FULL_NAME in both advdata and srdata. A
+ * 128-bit UUID (18 B) plus flags (3 B) leaves only 10 B of the 31 B payload,
+ * i.e. 8 characters -- so "Orange" (6) fitted but "OrangePro" (9) could not, and
+ * the two boards behaved differently. Because of that the companion app cannot
+ * have depended on the name being in the advertising packet.
+ *
+ * Putting it in the scan response always fits and is what the legacy srdata
+ * request implied. Standard central APIs merge the two. Tracked in
+ * MIGRATION_NOTES.md; verify against the app.
+ */
+static const struct bt_data scan_rsp[] = {
+	BT_DATA(BT_DATA_NAME_COMPLETE, ORANGELINK_DEFAULT_NAME,
+		sizeof(ORANGELINK_DEFAULT_NAME) - 1),
+};
+
+/* Continuous, connectable, undirected. Interval fixed at 300 ms. */
+static const struct bt_le_adv_param *adv_param =
+	BT_LE_ADV_PARAM(BT_LE_ADV_OPT_CONN,
+			ORANGELINK_ADV_INTERVAL,
+			ORANGELINK_ADV_INTERVAL,
+			NULL);
+
+static struct bt_conn *current_conn;
+
+/* Set when a Custom Name write asks for a disconnect so advertising can restart
+ * under the new name. Mirrors the legacy bleNameChangeFlg.
+ */
+static bool name_change_pending;
+
+static int advertising_start(void)
+{
+	int err = bt_le_adv_start(adv_param, adv_data, ARRAY_SIZE(adv_data),
+				  scan_rsp, ARRAY_SIZE(scan_rsp));
+	if (err) {
+		LOG_ERR("advertising start failed (%d)", err);
+		return err;
+	}
+
+	LOG_INF("advertising as \"%s\" at %u ms",
+		bt_get_name(), (ORANGELINK_ADV_INTERVAL * 625) / 1000);
+	return 0;
+}
+
+/* ------------------------------------------------------------------------- *
+ * Connection handling
+ * ------------------------------------------------------------------------- */
+
+static void on_connected(struct bt_conn *conn, uint8_t err)
+{
+	if (err) {
+		LOG_ERR("connection failed (0x%02x)", err);
+		return;
+	}
+
+	current_conn = bt_conn_ref(conn);
+	LOG_INF("connected");
+
+	/* Legacy started the APS and config command loops plus the battery timer
+	 * here. The Timer Tick is the only one that exists so far.
+	 */
+	ips_timer_tick_start();
+}
+
+static void on_disconnected(struct bt_conn *conn, uint8_t reason)
+{
+	LOG_INF("disconnected (reason 0x%02x)", reason);
+
+	if (current_conn) {
+		bt_conn_unref(current_conn);
+		current_conn = NULL;
+	}
+
+	ips_timer_tick_stop();
+
+	if (name_change_pending) {
+		name_change_pending = false;
+		/* Re-apply the new name before advertising resumes. */
+		uint16_t len;
+		const uint8_t *name = ips_cus_name_get(&len);
+		char buf[IPS_CUS_NAME_MAX_LEN + 1];
+
+		len = MIN(len, IPS_CUS_NAME_MAX_LEN);
+		memcpy(buf, name, len);
+		buf[len] = '\0';
+
+		if (bt_set_name(buf)) {
+			LOG_WRN("bt_set_name(\"%s\") failed", buf);
+		} else {
+			LOG_INF("device name is now \"%s\"", buf);
+		}
+	}
+
+	advertising_start();
+}
+
+static void on_le_param_updated(struct bt_conn *conn, uint16_t interval,
+				uint16_t latency, uint16_t timeout)
+{
+	LOG_INF("conn params updated: interval %u, latency %u, timeout %u",
+		interval, latency, timeout);
+}
+
+static void on_le_phy_updated(struct bt_conn *conn,
+			      struct bt_conn_le_phy_info *param)
+{
+	/* Legacy only ever RESPONDED to a peer PHY request, answering PHY_AUTO --
+	 * it never initiated one. Support is enabled; the central drives it.
+	 * Actively requesting 2M here would be a behaviour change, not a port.
+	 */
+	LOG_INF("PHY updated: tx %u, rx %u", param->tx_phy, param->rx_phy);
+}
+
+BT_CONN_CB_DEFINE(conn_callbacks) = {
+	.connected = on_connected,
+	.disconnected = on_disconnected,
+	.le_param_updated = on_le_param_updated,
+	.le_phy_updated = on_le_phy_updated,
+};
+
+/* ------------------------------------------------------------------------- *
+ * IPS events
+ * ------------------------------------------------------------------------- */
+
+static void ips_event_handler(const struct ips_evt *evt)
+{
+	switch (evt->type) {
+	case IPS_EVT_DATA_RX:
+		LOG_HEXDUMP_DBG(evt->data, evt->len, "Data write");
+		/*
+		 * TODO(phase4): Aps_PutCmd(evt->data, evt->len, evt->rssi).
+		 * The APS parser must bound-check before copying -- the legacy
+		 * Aps_PutCmd() did not, which is the overflow in
+		 * docs/aps-protocol-spec.md section 7.
+		 */
+		break;
+
+	case IPS_EVT_CUS_NAME_RX:
+		LOG_INF("custom name write, %u B", evt->len);
+		/*
+		 * Legacy behaviour, preserved exactly: persist the name, then
+		 * disconnect so advertising restarts under it, reporting HCI reason
+		 * 0x3B. The app very likely special-cases that reason code.
+		 *
+		 * TODO(phase4): persist via the settings subsystem.
+		 */
+		name_change_pending = true;
+		if (current_conn) {
+			bt_conn_disconnect(current_conn,
+					   BT_HCI_ERR_UNACCEPT_CONN_PARAM);
+		}
+		break;
+
+	case IPS_EVT_LED_MODE_RX:
+		/* Accepted and ignored, as in the legacy firmware. */
+		LOG_DBG("LED mode write: 0x%02x (ignored)", evt->data[0]);
+		break;
+	}
+}
+
+/* ------------------------------------------------------------------------- *
+ * Entry point
+ * ------------------------------------------------------------------------- */
+
+int main(void)
+{
+	int err;
+
+	LOG_INF("Orangelink NCS starting (%s)", CONFIG_BOARD_TARGET);
+
+	ips_init(ips_event_handler);
+	ips_cus_name_set((const uint8_t *)ORANGELINK_DEFAULT_NAME,
+			 sizeof(ORANGELINK_DEFAULT_NAME) - 1);
+
+	err = bt_enable(NULL);
+	if (err) {
+		LOG_ERR("bt_enable failed (%d)", err);
+		return err;
+	}
+
+	LOG_INF("Bluetooth initialised");
+
+	err = advertising_start();
+	if (err) {
+		return err;
+	}
+
+	/*
+	 * Nothing to do in the main thread. The legacy super-loop called
+	 * nrf_pwr_mgmt_run(); under Zephyr the idle thread handles low power, so
+	 * main simply returns and the kernel keeps running.
+	 */
+	return 0;
+}

@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: GPL-2.0-only
+mainmenu "Orangelink"
+
+config ORANGELINK_LOG_LEVEL
+	int "Orangelink log level"
+	default 3
+	range 0 4
+	help
+	  Log level for Orangelink modules: 0=off 1=err 2=wrn 3=inf 4=dbg.
+
+source "Kconfig.zephyr"

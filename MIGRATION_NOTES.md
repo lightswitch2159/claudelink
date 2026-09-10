@@ -216,3 +216,125 @@ companion-app compatibility. Do not "clean these up."
 | Key rotation / revocation plan | Security | Before production |
 | `UICR APPROTECT` readback protection in the NCS build | Security | Before production flashing |
 | In-field OTA migration — recommend dropping if chip changes | Product | Phase 5 |
+
+---
+
+## 5. Phase 1/2 build results (XIAO nRF52840, NCS v3.4.0)
+
+First real builds. Toolchain: Zephyr SDK 1.0.1, `arm-zephyr-eabi-gcc 14.3.0`,
+Zephyr 4.4.0, sdk-nrf v3.4.0.
+
+### Measured footprint -- the proof-of-fit Phase 0 could not produce
+
+| Image | Load offset | Partition | Used | % |
+|---|---|---|---|---|
+| MCUboot | `0x00000` | 48 KB | 39,664 B | 80.7% |
+| Application (signed) | `0x0C000` | 442,218 B usable | 178,348 B | 40.3% |
+| Application RAM | -- | 256 KB | 39,468 B | 15.1% |
+
+Contents: BLE peripheral + full IPS GATT service + Battery Service + SPI + ADC +
+PWM + watchdog + Settings/NVS + UART logging + MCUboot dual-slot signed with
+ECDSA P-256. Not yet included: APS handler, sub-GHz state machine, RFM69 driver,
+NUS.
+
+**This retroactively confirms the nRF52810 verdict with first-party numbers.**
+178 KB of application would not fit its 52 KB slot, and 39.5 KB of RAM exceeds
+the part's entire 24 KB.
+
+**MCUboot is at 80.7% of its 48 KB partition** -- only 8.3 KB spare. 64 KB is
+unallocated at the top of flash and can be moved into `boot_partition` if
+MCUboot needs to grow (serial recovery, for instance, would not fit today).
+
+### Verified encoding port
+
+`4b6b.c`, `4b6b.h` and `manchester.c` were copied **byte-identical** from the
+legacy tree; `manchester.h` gained only `#include <stdbool.h>` (it used `bool`
+while relying on SDK headers). A `ztest` suite in `tests/encoding/` runs on
+`native_sim`: **9/9 pass, zero warnings**, covering round-trip identity for all
+256 byte values and lengths to 71, plus the documented output-length formulas.
+
+That establishes the libraries behave identically under GCC 14.3 as under the
+original ARMCC5. Known-answer vectors from validated pump captures still need
+adding -- round-trip identity would not catch a codebook that is
+self-consistently wrong.
+
+### New deviations from original behaviour
+
+#### 5.1 Device name moved to the scan response
+
+Legacy asked for `BLE_ADVDATA_FULL_NAME` in **both** advdata and srdata. A
+128-bit UUID (18 B) plus flags (3 B) leaves 10 B of the 31 B payload, i.e. 8
+characters -- so `"Orange"` (6) fitted the advertising packet but `"OrangePro"`
+(9) could not, and the two boards behaved differently. The companion app
+therefore cannot depend on the name being in the advertising payload.
+
+The port puts flags + IPS UUID in the advertising packet and the complete name in
+the scan response. Always fits; standard central APIs merge the two. **Verify
+against the app.**
+
+#### 5.2 Chip select handed to Zephyr
+
+`cs-gpios` on `&spi2` replaces the legacy manual NSS toggling and per-transfer
+bus de-init. Better design, but a behavioural change -- validate RFM69 CS timing
+with a logic analyser before trusting it, and fall back to manual GPIO CS if the
+radios prove fussy.
+
+#### 5.3 `i2c1` disabled
+
+The board enables `i2c1` on P0.04/P0.05, which are D4/D5 -- the pins the motor
+and buzzer PWM need. Disabled in the overlay. I2C is not otherwise used.
+
+#### 5.4 Motor and buzzer moved to pwm1/pwm2
+
+`&pwm0` is already bound by the board to `pwm_led0` on P0.17, which is not even a
+header pin. Motor uses `&pwm1` (D4), buzzer `&pwm2` (D5).
+
+#### 5.5 Battery ADC channel and scaling both change
+
+Legacy read P0.04 / AIN2 through an external divider. The XIAO reads AIN7 /
+P0.31 through its own onboard divider, gated by P0.14.
+
+**P0.14 must be held LOW while sampling** -- Seeed documents that with it HIGH the
+sense path is disabled and P0.31 may reach 3.6 V, risking damage to the pin. It is
+declared `GPIO_ACTIVE_LOW` in the overlay so `gpio_pin_set(...,1)` enables sensing.
+
+The mV conversion in `app_battery.c` must be **recalculated, not carried over**,
+and the divider ratio bench-calibrated against a measured cell voltage.
+
+#### 5.6 UF2 bootloader and its partition layout replaced
+
+The board pulls in `nrf52840_partition_uf2_sdv7.dtsi`: a 156 KB SoftDevice
+reservation we do not need (Zephyr links its own SoftDevice Controller into the
+application) plus a 48 KB Adafruit UF2 bootloader that performs **no signature
+verification**. Both are deleted and replaced by the MCUboot layout in
+`dts/orangelink-partitions.dtsi`.
+
+**Consequence: USB drag-and-drop flashing no longer works for MCUboot builds; an
+SWD probe is required.** Builds without MCUboot keep the board's UF2 layout and
+stay USB-flashable, which is the practical path for bring-up.
+
+#### 5.7 MCUboot has no console
+
+The board's chosen console is the USB CDC ACM device, and MCUboot does not enable
+the USB stack -- `uart_console.c` then links against a device that was never
+instantiated. `sysbuild/mcuboot.conf` disables console, serial and logging in the
+bootloader, which is correct for a bootloader regardless and saves flash.
+
+#### 5.8 `CONFIG_BT_USER_PHY_UPDATE` enabled
+
+Only to expose the `le_phy_updated` callback for observability. Zephyr responds to
+peer PHY requests with or without it, and the port still does **not** initiate a
+PHY update -- matching legacy behaviour (see section 1.2).
+
+### Two build-system traps worth recording
+
+1. **Paths containing spaces break the Zephyr build.** The original working
+   directory was `.../OL SDK Update/`, and Kconfig failed with a bare
+   "no such file or directory" from `cmake -E env`. The workspace lives at
+   `/home/user/ai/orangelink-ncs-ws` for this reason.
+
+2. **A shared partition `.dtsi` must not set `zephyr,code-partition`.** Doing so
+   leaked into the MCUboot image and gave the bootloader
+   `CONFIG_FLASH_LOAD_OFFSET=0xc000`, splitting its image across `0x0` and slot0 --
+   a build that passed cleanly and would not have booted. The chosen now lives in
+   an app-image-only overlay. **Check link addresses, not just build success.**

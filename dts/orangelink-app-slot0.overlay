@@ -1,0 +1,21 @@
+/*
+ * Application-image-only: place the app in MCUboot's primary slot.
+ * SPDX-License-Identifier: GPL-2.0-only
+ *
+ * Separate from orangelink-partitions.dtsi on purpose. That file is shared with
+ * the MCUboot image, and putting this chosen there gave the BOOTLOADER
+ * FLASH_LOAD_OFFSET=0xc000, splitting its image across 0x0 and slot0.
+ *
+ * It is also needed because deleting the board's UF2 layout removes the
+ * `code_partition` node that xiao_ble's chosen still references -- without a
+ * replacement the app build fails with
+ *   devicetree error: /chosen: undefined node label 'code_partition'
+ *
+ * MCUboot substitutes its own code-partition, so it must NOT receive this file.
+ */
+
+/ {
+	chosen {
+		zephyr,code-partition = &slot0_partition;
+	};
+};

@@ -1,0 +1,215 @@
+/*
+ * Orangelink on Seeed XIAO nRF52840.
+ * SPDX-License-Identifier: GPL-2.0-only
+ *
+ * Verified against the real board files in
+ * zephyr/boards/seeed/xiao_ble/ (NCS v3.4.0 / Zephyr 4.4.0).
+ *
+ * What the board already gives us, so we do NOT redeclare it:
+ *   - led0 P0.26 (red), led1 P0.30 (green), led2 P0.06 (blue), all ACTIVE_LOW
+ *   - &spi2 (alias xiao_spi) on D8/D9/D10 = P1.13 SCK / P1.14 MISO / P1.15 MOSI
+ *   - &adc enabled, &gpiote enabled, &gpio0/&gpio1 enabled
+ *   - DCDC via &reg1 regulator-initial-mode
+ *   - USB CDC ACM console, &qspi + p25q16h 2MB external flash
+ *   - &xiao_d GPIO nexus mapping D0..D10
+ *
+ * Two conflicts the board default creates, both resolved below:
+ *   1. &i2c1 (xiao_i2c) claims P0.04/P0.05 == D4/D5, which we need for PWM.
+ *   2. &pwm0 is already bound to pwm_led0 on P0.17, so motor/buzzer use pwm1/pwm2.
+ */
+
+/ {
+	aliases {
+		/*
+		 * Legacy LED_0 / LED_1 were two discrete active-low GPIO and the
+		 * indication patterns synthesised yellow by driving both. The XIAO has
+		 * one common-anode RGB device, so periph/led/led.c becomes a colour
+		 * model rather than a two-pin model. User-visible change -- tracked in
+		 * MIGRATION_NOTES.md.
+		 */
+		orangelink-led-r = &led0;
+		orangelink-led-g = &led1;
+		orangelink-led-b = &led2;
+	};
+
+	orangelink {
+		compatible = "gpio-keys";
+
+		/*
+		 * Battery sense enable. ACTIVE LOW.
+		 *
+		 * !!! HARDWARE HAZARD !!!  Seeed documents that with P0.14 HIGH the
+		 * sense path is disabled and P0.31 may rise to 3.6 V, risking damage to
+		 * the pin. Hold this LOW whenever AIN7 is sampled. Declared ACTIVE_LOW
+		 * so gpio_pin_set(..., 1) enables sensing.
+		 *
+		 * The board devicetree does NOT define this -- it is ours to get right.
+		 */
+		vbat_enable: vbat_enable {
+			gpios = <&gpio0 14 GPIO_ACTIVE_LOW>;
+			label = "VBAT read enable";
+		};
+	};
+};
+
+/*
+ * D4/D5 are wanted for motor and buzzer PWM. The board enables i2c1 on exactly
+ * those pins (P0.04 SDA / P0.05 SCL), so it must be turned off or the pins are
+ * double-claimed.
+ */
+&i2c1 {
+	status = "disabled";
+};
+
+/*
+ * Both RFM69 radios share SPI2. Board pinctrl (spi2_default/spi2_sleep) is
+ * already correct for D8/D9/D10, so only chip selects and the child nodes are
+ * added here.
+ *
+ * DEVIATION: the legacy driver drove NSS by hand and de-inited the bus between
+ * transfers. Declaring cs-gpios hands CS to Zephyr, which is the better design
+ * but IS a behavioural change -- validate RFM69 CS timing with a logic analyser
+ * before trusting it. If the radios prove fussy, revert to manual GPIO CS.
+ * See MIGRATION_NOTES.md.
+ */
+&spi2 {
+	status = "okay";
+	cs-gpios = <&xiao_d 0 GPIO_ACTIVE_LOW>,   /* D0 = P0.02 -> radio 0 NSS */
+	           <&xiao_d 1 GPIO_ACTIVE_LOW>;   /* D1 = P0.03 -> radio 1 NSS */
+
+	/* 433 MHz -- Omnipod. Legacy RF69_DEV_FREQ433 == device 0. */
+	rf69_433: rf69@0 {
+		compatible = "orangelink,rfm69";
+		reg = <0>;
+		spi-max-frequency = <4000000>;
+		band = "433";
+		dio0-gpios = <&xiao_d 2 GPIO_ACTIVE_HIGH>;   /* D2 = P0.28 */
+		/* reset-gpios deliberately omitted -- see the pin note at the end
+		 * of this file. Tie RFM69 RESET low (inactive) in hardware.
+		 */
+	};
+
+	/*
+	 * 868/916 MHz -- Minimed. Legacy RF69_DEV_FREQ916N868 == device 1.
+	 * Band is tagged 916 here; the application retunes between 868 and 916 at
+	 * runtime from the CMD_UPDATE_REG frequency registers, so this only records
+	 * which radio is fitted for the Minimed bands.
+	 */
+	rf69_916: rf69@1 {
+		compatible = "orangelink,rfm69";
+		reg = <1>;
+		spi-max-frequency = <4000000>;
+		band = "916";
+		dio0-gpios = <&xiao_d 3 GPIO_ACTIVE_HIGH>;   /* D3 = P0.29 */
+		/* reset-gpios deliberately omitted -- see the pin note below. */
+	};
+};
+
+/*
+ * Motor PWM on D4 = P0.04. Legacy duty was 50%.
+ *
+ * NOTE: XIAO GPIO source at most 15 mA and cannot drive a vibration motor
+ * directly -- this requires a MOSFET or driver IC on the carrier board.
+ */
+&pwm1 {
+	status = "okay";
+	pinctrl-0 = <&pwm1_default>;
+	pinctrl-1 = <&pwm1_sleep>;
+	pinctrl-names = "default", "sleep";
+};
+
+/* Buzzer PWM on D5 = P0.05. Legacy: 50% duty, PWM top 366. XH_5102 only. */
+&pwm2 {
+	status = "okay";
+	pinctrl-0 = <&pwm2_default>;
+	pinctrl-1 = <&pwm2_sleep>;
+	pinctrl-names = "default", "sleep";
+};
+
+/*
+ * Battery voltage on AIN7 = P0.31, through the XIAO's onboard divider.
+ *
+ * Legacy used P0.04 / AIN2 with a different external divider, so the mV
+ * conversion in app_battery.c MUST be recalculated -- do not carry the old
+ * scaling across. Internal 0.6 V reference with gain 1/6 gives a 3.6 V full
+ * scale, which covers a 4.2 V cell through any divider ratio at or below 0.85.
+ * The exact ratio needs bench calibration against a measured cell voltage.
+ */
+&adc {
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	channel@7 {
+		reg = <7>;
+		zephyr,gain = "ADC_GAIN_1_6";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,input-positive = <NRF_SAADC_AIN7>;
+		zephyr,resolution = <12>;
+		zephyr,oversampling = <4>;
+	};
+};
+
+&pinctrl {
+	pwm1_default: pwm1_default {
+		group1 {
+			psels = <NRF_PSEL(PWM_OUT0, 0, 4)>;    /* D4 motor */
+		};
+	};
+
+	pwm1_sleep: pwm1_sleep {
+		group1 {
+			psels = <NRF_PSEL(PWM_OUT0, 0, 4)>;
+			low-power-enable;
+		};
+	};
+
+	pwm2_default: pwm2_default {
+		group1 {
+			psels = <NRF_PSEL(PWM_OUT0, 0, 5)>;    /* D5 buzzer */
+		};
+	};
+
+	pwm2_sleep: pwm2_sleep {
+		group1 {
+			psels = <NRF_PSEL(PWM_OUT0, 0, 5)>;
+			low-power-enable;
+		};
+	};
+};
+
+/*
+ * ---------------------------------------------------------------------------
+ * PIN ALLOCATION -- 9 of 11 header pins used
+ * ---------------------------------------------------------------------------
+ *   D0  P0.02   RFM69 433    NSS        D6  P1.11   UART TX (console)
+ *   D1  P0.03   RFM69 916    NSS        D7  P1.12   UART RX (console)
+ *   D2  P0.28   RFM69 433    DIO0 IRQ   D8  P1.13   SPI SCLK
+ *   D3  P0.29   RFM69 916    DIO0 IRQ   D9  P1.14   SPI MISO
+ *   D4  P0.04   PWM motor (ext driver)  D10 P1.15   SPI MOSI
+ *   D5  P0.05   PWM buzzer
+ *
+ * Onboard, no header pins consumed:
+ *   P0.26/P0.30/P0.06  RGB LED       P0.31 AIN7 VBAT     P0.14 VBAT enable
+ *
+ * On RFM69 RESET and the console -- D6/D7 are contested:
+ *
+ * The XIAO has no onboard debug probe, so RTT over SWD is not available without
+ * extra hardware. That makes a console genuinely load-bearing for bring-up, and
+ * D6/D7 are the board's default UART pins. RFM69 RESET, by contrast, can simply
+ * be tied inactive in hardware -- the driver never asserted it (the legacy
+ * design did not route it either).
+ *
+ * So D6/D7 stay as the UART console and reset-gpios is omitted above.
+ *
+ * If RESET does turn out to be needed, the alternative is to move the console to
+ * USB CDC ACM, which the board already provides (cdc_acm_serial.dtsi) and which
+ * costs no header pins -- freeing both D6 and D7. That trades roughly 15 KB of
+ * flash for the USB stack, which on a 1 MB part is affordable.
+ *
+ * The DIO0 lines are new. The legacy board never routed them, which is why the
+ * driver busy-polls REG_IRQFLAGS2 over SPI and Subg_GetPkt() blocks for
+ * seconds. See docs/aps-protocol-spec.md section 6.2.
+ * ---------------------------------------------------------------------------
+ */

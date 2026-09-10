@@ -1,0 +1,42 @@
+# Copyright (c) 2026
+# SPDX-License-Identifier: GPL-2.0-only
+
+description: |
+  HopeRF RFM69 sub-GHz transceiver on SPI.
+
+  There is no upstream Zephyr driver for the RFM69; this binding exists so the
+  ported periph/rf69 driver can obtain a spi_dt_spec plus its DIO0 interrupt
+  line from devicetree instead of compile-time pin macros.
+
+  Chip select is declared through the parent SPI controller's cs-gpios so that
+  Zephyr manages it. The legacy nRF5 driver toggled NSS by hand and de-inited
+  the bus between transfers; see MIGRATION_NOTES.md for that deviation.
+
+compatible: "orangelink,rfm69"
+
+include: spi-device.yaml
+
+properties:
+  dio0-gpios:
+    type: phandle-array
+    description: |
+      DIO0 interrupt line from the radio. The legacy hardware never routed this
+      and the driver busy-polled REG_IRQFLAGS2 over SPI instead, which is the
+      root of the blocking-RX problem documented in docs/aps-protocol-spec.md
+      section 6.2. Required on new hardware.
+
+  reset-gpios:
+    type: phandle-array
+    description: |
+      Optional RFM69 RESET line, active high. Omit if tied off in hardware.
+
+  band:
+    type: string
+    required: true
+    enum:
+      - "433"
+      - "868"
+      - "916"
+    description: |
+      Frequency band this radio is fitted for. The application selects between
+      radios by band: 433 MHz drives Omnipod, 868/916 MHz drives Minimed.
