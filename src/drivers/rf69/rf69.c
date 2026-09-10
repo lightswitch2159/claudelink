@@ -24,8 +24,8 @@ LOG_MODULE_REGISTER(rf69, CONFIG_ORANGELINK_LOG_LEVEL);
 static const struct spi_dt_spec rf69_bus = SPI_DT_SPEC_GET(
 	RF69_NODE, SPI_WORD_SET(8) | SPI_TRANSFER_MSB | SPI_OP_MODE_MASTER, 0);
 
-static const struct gpio_dt_spec rf69_dio0 =
-	GPIO_DT_SPEC_GET_OR(RF69_NODE, dio0_gpios, {0});
+static const struct gpio_dt_spec rf69_dio1 =
+	GPIO_DT_SPEC_GET_OR(RF69_NODE, dio1_gpios, {0});
 
 /*
  * FSTEP = FXOSC / 2^19 = 32 MHz / 524288 = 61.03515625 Hz.
@@ -194,7 +194,11 @@ static const uint8_t rf69_cfg_916[][2] = {
 	{ REG_FRFMID,        (uint8_t)RF_FRFMID_916 },
 	{ REG_FRFLSB,        (uint8_t)RF_FRFLSB_916 },
 	{ REG_RXBW,          RF_RXBW_DCCFREQ_000 | RF_RXBW_MANT_20 | RF_RXBW_EXP_0 },
-	{ REG_DIOMAPPING1,   RF_DIOMAPPING1_DIO0_00 },
+	/* DEVIATION from the legacy table, enabled by new hardware: DIO1 is mapped
+	 * to FifoNotEmpty (0b10) so receive can be interrupt-driven. Legacy wrote
+	 * DIO0_00 only, leaving DIO1 at its 0b00 default of FifoLevel.
+	 */
+	{ REG_DIOMAPPING1,   RF_DIOMAPPING1_DIO0_00 | RF_DIOMAPPING1_DIO1_10 },
 	{ REG_DIOMAPPING2,   RF_DIOMAPPING2_CLKOUT_OFF },
 	{ REG_IRQFLAGS2,     RF_IRQFLAGS2_FIFOOVERRUN },
 	{ REG_RSSITHRESH,    228 },
@@ -233,7 +237,7 @@ int rf69_config_916(void)
 }
 
 /* ------------------------------------------------------------------------- *
- * RSSI and DIO0
+ * RSSI and DIO1
  * ------------------------------------------------------------------------- */
 
 int16_t rf69_read_rssi(bool trigger)
@@ -262,12 +266,217 @@ int16_t rf69_read_rssi(bool trigger)
 	return -(int16_t)(v >> 1);
 }
 
-int rf69_dio0_get(void)
+int rf69_dio1_get(void)
 {
-	if (rf69_dio0.port == NULL) {
+	if (rf69_dio1.port == NULL) {
 		return -ENODEV;
 	}
-	return gpio_pin_get_dt(&rf69_dio0);
+	return gpio_pin_get_dt(&rf69_dio1);
+}
+
+/* ------------------------------------------------------------------------- *
+ * FIFO
+ *
+ * REG_FIFO (0x00) is the FIFO access register: repeated reads pop bytes,
+ * repeated writes push them. A burst write sends the address byte once followed
+ * by the payload, which is what the legacy Rf69_XmitBuf did.
+ * ------------------------------------------------------------------------- */
+
+int rf69_fifo_write(const uint8_t *data, uint16_t len)
+{
+	uint8_t addr = REG_FIFO | 0x80;
+	const struct spi_buf txb[2] = {
+		{ .buf = &addr, .len = 1 },
+		{ .buf = (void *)data, .len = len },
+	};
+	const struct spi_buf_set txs = { .buffers = txb, .count = 2 };
+
+	if (data == NULL || len == 0) {
+		return -EINVAL;
+	}
+	return spi_write_dt(&rf69_bus, &txs);
+}
+
+int rf69_fifo_write_byte(uint8_t b)
+{
+	return rf69_write_reg(REG_FIFO, b);
+}
+
+int rf69_fifo_read_byte(uint8_t *b)
+{
+	return rf69_read_reg(REG_FIFO, b);
+}
+
+bool rf69_fifo_is_empty(void)
+{
+	uint8_t f = 0;
+
+	if (rf69_read_reg(REG_IRQFLAGS2, &f)) {
+		return true;   /* fail closed: treat an unreadable FIFO as empty */
+	}
+	return (f & RF_IRQFLAGS2_FIFONOTEMPTY) == 0;
+}
+
+bool rf69_fifo_is_full(void)
+{
+	uint8_t f = 0;
+
+	if (rf69_read_reg(REG_IRQFLAGS2, &f)) {
+		return true;   /* fail closed: do not push into an unknown FIFO */
+	}
+	return (f & RF_IRQFLAGS2_FIFOFULL) != 0;
+}
+
+bool rf69_packet_sent(void)
+{
+	uint8_t f = 0;
+
+	if (rf69_read_reg(REG_IRQFLAGS2, &f)) {
+		return false;
+	}
+	return (f & RF_IRQFLAGS2_PACKETSENT) != 0;
+}
+
+int rf69_fifo_clear(void)
+{
+	/* Writing FIFOOVERRUN resets the FIFO and the status flags. */
+	return rf69_write_reg(REG_IRQFLAGS2, RF_IRQFLAGS2_FIFOOVERRUN);
+}
+
+int rf69_set_payload_len(uint8_t len)
+{
+	return rf69_write_reg(REG_PAYLOADLENGTH, len);
+}
+
+int rf69_set_power_level(uint8_t level)
+{
+	uint8_t pa = 0;
+	int err = rf69_read_reg(REG_PALEVEL, &pa);
+
+	if (err) {
+		return err;
+	}
+	return rf69_write_reg(REG_PALEVEL, (pa & 0xE0) | (level & 0x1F));
+}
+
+/* ------------------------------------------------------------------------- *
+ * DIO1 interrupt
+ * ------------------------------------------------------------------------- */
+
+static struct gpio_callback dio1_cb_data;
+static struct k_sem *dio1_sem;
+
+static void dio1_handler(const struct device *port, struct gpio_callback *cb,
+			 gpio_port_pins_t pins)
+{
+	ARG_UNUSED(port);
+	ARG_UNUSED(cb);
+	ARG_UNUSED(pins);
+
+	if (dio1_sem) {
+		k_sem_give(dio1_sem);
+	}
+}
+
+int rf69_dio1_irq_enable(struct k_sem *sem)
+{
+	int err;
+
+	if (rf69_dio1.port == NULL) {
+		return -ENODEV;
+	}
+
+	dio1_sem = sem;
+
+	gpio_init_callback(&dio1_cb_data, dio1_handler, BIT(rf69_dio1.pin));
+	err = gpio_add_callback(rf69_dio1.port, &dio1_cb_data);
+	if (err) {
+		return err;
+	}
+
+	return gpio_pin_interrupt_configure_dt(&rf69_dio1, GPIO_INT_EDGE_TO_ACTIVE);
+}
+
+int rf69_dio1_irq_disable(void)
+{
+	if (rf69_dio1.port == NULL) {
+		return -ENODEV;
+	}
+	gpio_pin_interrupt_configure_dt(&rf69_dio1, GPIO_INT_DISABLE);
+	gpio_remove_callback(rf69_dio1.port, &dio1_cb_data);
+	dio1_sem = NULL;
+	return 0;
+}
+
+/* ------------------------------------------------------------------------- *
+ * DIO1 connectivity
+ *
+ * DIO1 is mapped to FifoNotEmpty, a signal we control completely: the FIFO is
+ * empty or it is not. So the line can be driven to a known state and read back,
+ * which is a real connectivity test rather than sampling whatever a floating
+ * input happens to sit at.
+ * ------------------------------------------------------------------------- */
+
+enum rf69_dio1_state rf69_dio1_check(struct rf69_selftest *r)
+{
+	uint8_t flags;
+	bool flag_empty, flag_full;
+	int level_empty, level_notempty;
+	uint8_t scratch;
+
+	if (rf69_dio1.port == NULL) {
+		return RF69_DIO1_NO_GPIO;
+	}
+
+	rf69_set_mode(RF69_MODE_STANDBY);
+
+	/* Make sure DIO1 really is FifoNotEmpty before trusting the line. */
+	rf69_write_reg(REG_DIOMAPPING1,
+		       RF_DIOMAPPING1_DIO0_00 | RF_DIOMAPPING1_DIO1_10);
+
+	/* State A: FIFO drained -> flag low, line should be low. */
+	rf69_fifo_clear();
+	while (!rf69_fifo_is_empty()) {
+		if (rf69_fifo_read_byte(&scratch) != 0) {
+			break;
+		}
+	}
+	k_busy_wait(200);
+	rf69_read_reg(REG_IRQFLAGS2, &flags);
+	flag_empty = (flags & RF_IRQFLAGS2_FIFONOTEMPTY) != 0;
+	level_empty = gpio_pin_get_dt(&rf69_dio1);
+
+	/* State B: one byte in the FIFO -> flag high, line should be high. */
+	rf69_fifo_write_byte(0x69);
+	k_busy_wait(200);
+	rf69_read_reg(REG_IRQFLAGS2, &flags);
+	flag_full = (flags & RF_IRQFLAGS2_FIFONOTEMPTY) != 0;
+	level_notempty = gpio_pin_get_dt(&rf69_dio1);
+
+	/* Leave the FIFO as we found it. */
+	rf69_fifo_clear();
+
+	if (r) {
+		r->dio1_low_level = level_empty;
+		r->dio1_high_level = level_notempty;
+		r->dio1_flag_toggled = (!flag_empty && flag_full);
+	}
+
+	/* If the radio's own flag never moved, the test says nothing about wiring. */
+	if (flag_empty || !flag_full) {
+		return RF69_DIO1_INCONCLUSIVE;
+	}
+
+	if (level_empty == 0 && level_notempty == 1) {
+		return RF69_DIO1_OK;
+	}
+	if (level_empty == 1 && level_notempty == 1) {
+		return RF69_DIO1_STUCK_HIGH;
+	}
+	if (level_empty == 0 && level_notempty == 0) {
+		return RF69_DIO1_STUCK_LOW;
+	}
+	return RF69_DIO1_NOT_WIRED;
 }
 
 /* ------------------------------------------------------------------------- *
@@ -283,19 +492,19 @@ int rf69_init(void)
 		return -ENODEV;
 	}
 
-	if (rf69_dio0.port != NULL) {
-		err = gpio_pin_configure_dt(&rf69_dio0, GPIO_INPUT);
+	if (rf69_dio1.port != NULL) {
+		err = gpio_pin_configure_dt(&rf69_dio1, GPIO_INPUT);
 		if (err) {
-			LOG_WRN("DIO0 configure failed (%d)", err);
+			LOG_WRN("DIO1 configure failed (%d)", err);
 		}
 	} else {
-		LOG_WRN("DIO0 not described in devicetree");
+		LOG_WRN("DIO1 not described in devicetree");
 	}
 
 	initialised = true;
-	LOG_INF("bound to %s, CS via devicetree, DIO0 %s",
+	LOG_INF("bound to %s, CS via devicetree, DIO1 %s",
 		rf69_bus.bus->name,
-		rf69_dio0.port ? "present" : "absent");
+		rf69_dio1.port ? "present" : "absent");
 	return 0;
 }
 
@@ -376,14 +585,13 @@ int rf69_selftest_run(struct rf69_selftest *out)
 	 */
 	r.rssi_plausible = (r.rssi_dbm < 0 && r.rssi_dbm > -128);
 
-	/* --- 6: DIO0 wiring --- */
-	r.dio0_level = rf69_dio0_get();
-	r.dio0_readable = (r.dio0_level == 0 || r.dio0_level == 1);
+	/* --- 6: DIO1 wiring, deterministically --- */
+	r.dio1 = rf69_dio1_check(&r);
 
 done:
 	r.all_passed = (r.link == RF69_LINK_OK) && r.write_readback &&
 		       r.config_applied && r.freq_ok && r.mode_ready &&
-		       r.rssi_plausible && r.dio0_readable;
+		       r.rssi_plausible && (r.dio1 == RF69_DIO1_OK);
 
 	if (out) {
 		*out = r;
@@ -459,11 +667,32 @@ void rf69_selftest_report(const struct rf69_selftest *r)
 	LOG_INF("[%s] rssi           %d dBm",
 		r->rssi_plausible ? "PASS" : "FAIL", r->rssi_dbm);
 
-	if (r->dio0_readable) {
-		LOG_INF("[PASS] dio0           level=%d", r->dio0_level);
-	} else {
-		LOG_WRN("[WARN] dio0           not readable (%d) -- not wired?",
-			r->dio0_level);
+	switch (r->dio1) {
+	case RF69_DIO1_OK:
+		LOG_INF("[PASS] dio1 wiring    follows FifoNotEmpty (low=%d high=%d)",
+			r->dio1_low_level, r->dio1_high_level);
+		break;
+	case RF69_DIO1_NOT_WIRED:
+		LOG_ERR("[FAIL] dio1 wiring    FifoNotEmpty toggles in the radio but the");
+		LOG_ERR("       GPIO does not follow (low=%d high=%d) -- DIO1 is not",
+			r->dio1_low_level, r->dio1_high_level);
+		LOG_ERR("       connected to D2/P0.28, or is on a different DIO pin.");
+		break;
+	case RF69_DIO1_STUCK_HIGH:
+		LOG_ERR("[FAIL] dio1 wiring    line stuck HIGH -- shorted to 3V3, or a");
+		LOG_ERR("       pull-up is overriding the radio.");
+		break;
+	case RF69_DIO1_STUCK_LOW:
+		LOG_ERR("[FAIL] dio1 wiring    line stuck LOW -- shorted to GND, or the");
+		LOG_ERR("       radio pin is not driving.");
+		break;
+	case RF69_DIO1_NO_GPIO:
+		LOG_ERR("[FAIL] dio1 wiring    no dio1-gpios in devicetree");
+		break;
+	case RF69_DIO1_INCONCLUSIVE:
+		LOG_ERR("[FAIL] dio1 wiring    FifoNotEmpty never changed in the radio;");
+		LOG_ERR("       cannot judge the wiring. Check the FIFO stage above.");
+		break;
 	}
 
 	LOG_INF("---- %s ----", r->all_passed ? "ALL PASSED" : "FAILURES PRESENT");

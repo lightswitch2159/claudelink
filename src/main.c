@@ -21,6 +21,7 @@
 #include "ble/ips.h"
 #include "drivers/rf69/rf69.h"
 #include "aps/aps.h"
+#include "subg/subg.h"
 
 LOG_MODULE_REGISTER(main, CONFIG_ORANGELINK_LOG_LEVEL);
 
@@ -256,6 +257,15 @@ static void rf69_check_fn(struct k_work *work)
 			LOG_INF("RFM69 self-test passed on attempt %u", attempt);
 			rf69_selftest_report(&r);
 			passed_once = true;
+
+			/* Radio confirmed good: bring up the packet path and run the
+			 * RF-free loopback so the FIFO and encoding chain are verified
+			 * before any pump traffic is attempted.
+			 */
+			subg_init();
+			struct subg_loopback lb;
+			subg_loopback_run(&lb);
+			subg_loopback_report(&lb);
 		}
 		return;   /* stop retrying */
 	}

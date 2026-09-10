@@ -11,9 +11,10 @@ target_sources(app PRIVATE
   src/encoding/manchester.c
   src/drivers/rf69/rf69.c
   src/aps/aps.c
+  src/subg/subg.c
 )
 
-target_include_directories(app PRIVATE src src/encoding src/drivers/rf69 src/aps)
+target_include_directories(app PRIVATE src src/encoding src/drivers/rf69 src/aps src/subg)
 
 # Phase 3/4 will add:
 #   src/aps/       <- legacy/project/app/src/app_aps.c

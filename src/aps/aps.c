@@ -14,6 +14,7 @@
 #include "aps.h"
 #include "ble/ips.h"
 #include "drivers/rf69/rf69.h"
+#include "subg/subg.h"
 #include "4b6b.h"
 #include "manchester.h"
 
@@ -102,8 +103,6 @@ static uint8_t use_pkt_len;
 static bool active;
 
 static uint32_t loop_count;   /* drives the statistics updTime field */
-static uint16_t pkt_rx_count;
-static uint16_t pkt_tx_count;
 
 /* ------------------------------------------------------------------------- *
  * Response helpers
@@ -149,7 +148,7 @@ static uint16_t encode(const uint8_t *src, uint8_t *dst, uint16_t len)
 	}
 }
 
-__maybe_unused static uint16_t decode(const uint8_t *src, uint8_t *dst, uint16_t len)
+static uint16_t decode(const uint8_t *src, uint8_t *dst, uint16_t len)
 {
 	switch (encoding) {
 	case ENCODING_NONE:
@@ -324,8 +323,8 @@ static void cmd_get_statistics(void)
 	sys_put_be32(loop_count * 10, &buf[0]);   /* updTime, ms */
 	sys_put_be16(0, &buf[4]);                 /* rxOverflowCnt      (always 0) */
 	sys_put_be16(0, &buf[6]);                 /* rxFifoOverflowCnt  (always 0) */
-	sys_put_be16(pkt_rx_count, &buf[8]);
-	sys_put_be16(pkt_tx_count, &buf[10]);
+	sys_put_be16(subg_get_rx_count(), &buf[8]);
+	sys_put_be16(subg_get_tx_count(), &buf[10]);
 	sys_put_be16(0, &buf[12]);                /* crcFailCnt         (always 0) */
 	sys_put_be16(0, &buf[14]);                /* spiSyncFailCnt     (always 0) */
 	sys_put_be16(0, &buf[16]);                /* placeholder0 */
@@ -334,19 +333,169 @@ static void cmd_get_statistics(void)
 	respond_data(buf, sizeof(buf));
 }
 
-/*
- * The three radio commands need the sub-GHz packet path, which is not ported yet.
+/* ------------------------------------------------------------------------- *
+ * Radio commands
  *
- * They answer RX_TIMEOUT rather than staying silent: the wire format is already
- * correct, so a host sees a well-formed "nothing received" instead of hanging.
- * That is deliberately distinguishable from the finished behaviour -- the log line
- * says plainly that the path is missing, so a passing integration test cannot be
- * mistaken for working radio traffic.
- */
-static void cmd_radio_not_ported(uint8_t cmd)
+ * Parameters are parsed with sys_get_be16/32 rather than by overlaying a packed
+ * struct and byte-swapping in place. The legacy code took the address of unaligned
+ * packed members and cast them, which is undefined behaviour that GCC warns about
+ * and may compile to an aligned load. See docs/aps-protocol-spec.md section 6.3.
+ * ------------------------------------------------------------------------- */
+
+/* RileyLink clients expect CC111x-style RSSI. Legacy formula, truncation included. */
+static uint8_t rssi_to_cc111x(int16_t dbm)
 {
-	LOG_WRN("cmd 0x%02x needs the sub-GHz packet path (not ported yet)", cmd);
-	respond_code(APS_RESP_RX_TIMEOUT);
+	return (uint8_t)((dbm + 73) * 2);
+}
+
+/* Emit [0xDD][rssi][pktCnt][payload...] for a received packet. */
+static void respond_rx_packet(const uint8_t *pkt, uint16_t len)
+{
+	uint8_t buf[2 + SUBG_MAX_PKT_LEN];
+
+	if (len > SUBG_MAX_PKT_LEN) {
+		len = SUBG_MAX_PKT_LEN;
+	}
+
+	buf[0] = rssi_to_cc111x(subg_get_last_rssi());
+	buf[1] = (uint8_t)(subg_get_rx_count() & 0xFF);
+	memcpy(&buf[2], pkt, len);
+
+	respond_data(buf, len + 2);
+}
+
+static void respond_rx_status(enum subg_rx_status st, const uint8_t *pkt, uint8_t len)
+{
+	switch (st) {
+	case SUBG_RX_OK:
+		respond_rx_packet(pkt, len);
+		break;
+	case SUBG_RX_TIMEOUT:
+		respond_code(APS_RESP_RX_TIMEOUT);
+		break;
+	case SUBG_RX_INTERRUPTED:
+		respond_code(APS_RESP_CMD_INTERRUPTED);
+		break;
+	}
+}
+
+/* CMD_GET_PKT: [listenChan][listenTimeout BE32] */
+static void cmd_get_pkt(const uint8_t *p, uint16_t len)
+{
+	uint8_t raw[SUBG_MAX_PKT_LEN] = { 0 };
+	uint8_t dec[SUBG_MAX_PKT_LEN] = { 0 };
+	uint8_t raw_len = 0;
+	uint16_t dec_len;
+	uint32_t timeout;
+	enum subg_rx_status st;
+
+	if (len < 5) {
+		respond_code(APS_RESP_PARAM_ERROR);
+		return;
+	}
+
+	timeout = sys_get_be32(&p[1]);   /* p[0] is listenChan, accepted and unused */
+
+	st = subg_get_pkt(raw, &raw_len, timeout);
+	if (st != SUBG_RX_OK) {
+		respond_rx_status(st, NULL, 0);
+		return;
+	}
+
+	dec_len = decode(raw, dec, raw_len);
+	respond_rx_packet(dec, dec_len);
+}
+
+/* Strip one trailing zero byte, as the legacy TX path did for Minimed. The radio
+ * layer appends its own terminator, so a caller-supplied one is redundant.
+ */
+static uint16_t trim_trailing_zero(const uint8_t *pkt, uint16_t len)
+{
+	if (len > 0 && pkt[len - 1] == 0) {
+		return len - 1;
+	}
+	return len;
+}
+
+/* CMD_SEND_PKT: [sendChan][repeatCnt][repeatIntvl BE16][preambleExtend BE16][payload...] */
+static void cmd_send_pkt(const uint8_t *p, uint16_t len)
+{
+	uint8_t enc[SUBG_MAX_PKT_LEN] = { 0 };
+	uint16_t payload_len, enc_len;
+	uint8_t repeat_cnt;
+	uint16_t repeat_intvl;
+
+	if (len < 6) {
+		respond_code(APS_RESP_PARAM_ERROR);
+		return;
+	}
+
+	repeat_cnt = p[1];
+	repeat_intvl = sys_get_be16(&p[2]);
+	payload_len = trim_trailing_zero(&p[6], len - 6);
+
+	enc_len = encode(&p[6], enc, payload_len);
+	if (enc_len == 0 || enc_len > sizeof(enc)) {
+		respond_code(APS_RESP_PARAM_ERROR);
+		return;
+	}
+
+	subg_send_pkt(enc, (uint8_t)enc_len, repeat_cnt, repeat_intvl);
+	respond_code(APS_RESP_SUCCESS);
+}
+
+/*
+ * CMD_SEND_AND_LISTEN:
+ * [sendChan][repeatCnt][repeatIntvl BE16][listenChan][listenTimeout BE32]
+ * [retryCnt][preambleExtend BE16][payload...]
+ */
+static void cmd_send_and_listen(const uint8_t *p, uint16_t len)
+{
+	uint8_t enc[SUBG_MAX_PKT_LEN] = { 0 };
+	uint8_t raw[SUBG_MAX_PKT_LEN] = { 0 };
+	uint8_t dec[SUBG_MAX_PKT_LEN] = { 0 };
+	uint8_t raw_len = 0;
+	uint16_t payload_len, enc_len, dec_len;
+	uint8_t repeat_cnt, retry_cnt;
+	uint16_t repeat_intvl;
+	uint32_t timeout;
+	enum subg_rx_status st;
+
+	if (len < 12) {
+		respond_code(APS_RESP_PARAM_ERROR);
+		return;
+	}
+
+	repeat_cnt = p[1];
+	repeat_intvl = sys_get_be16(&p[2]);
+	timeout = sys_get_be32(&p[5]);
+	retry_cnt = p[9];
+	payload_len = trim_trailing_zero(&p[12], len - 12);
+
+	enc_len = encode(&p[12], enc, payload_len);
+	if (enc_len == 0 || enc_len > sizeof(enc)) {
+		respond_code(APS_RESP_PARAM_ERROR);
+		return;
+	}
+
+	subg_send_pkt(enc, (uint8_t)enc_len, repeat_cnt, repeat_intvl);
+	st = subg_get_pkt(raw, &raw_len, timeout);
+
+	/* Retry loop: resend with repeatCnt forced to 0, as in legacy. */
+	while (st == SUBG_RX_TIMEOUT && retry_cnt > 0) {
+		LOG_DBG("send-and-listen retry, %u left", retry_cnt);
+		subg_send_pkt(enc, (uint8_t)enc_len, 0, repeat_intvl);
+		st = subg_get_pkt(raw, &raw_len, timeout);
+		retry_cnt--;
+	}
+
+	if (st != SUBG_RX_OK) {
+		respond_rx_status(st, NULL, 0);
+		return;
+	}
+
+	dec_len = decode(raw, dec, raw_len);
+	respond_rx_packet(dec, dec_len);
 }
 
 /* ------------------------------------------------------------------------- *
@@ -363,9 +512,13 @@ static void aps_dispatch(const struct aps_req *req)
 		cmd_get_version();
 		break;
 	case CMD_GET_PKT:
+		cmd_get_pkt(req->param, req->len);
+		break;
 	case CMD_SEND_PKT:
+		cmd_send_pkt(req->param, req->len);
+		break;
 	case CMD_SEND_AND_LISTEN:
-		cmd_radio_not_ported(req->cmd);
+		cmd_send_and_listen(req->param, req->len);
 		break;
 	case CMD_UPDATE_REG:
 		cmd_update_reg(req->param, req->len);
@@ -486,6 +639,12 @@ void aps_put_cmd(const uint8_t *buf, uint16_t len, int8_t rssi)
 
 void aps_set_active(bool on)
 {
+	if (!on) {
+		/* Legacy aborted an in-flight receive when BLE dropped to advertising,
+		 * which is what produced RESPONSE_CODE_CMD_INTERRUPTED. Preserved.
+		 */
+		subg_abort();
+	}
 	active = on;
 	LOG_INF("APS %s", on ? "active" : "inactive");
 }

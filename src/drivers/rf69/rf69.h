@@ -16,6 +16,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <zephyr/kernel.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -54,6 +55,15 @@ enum rf69_link_state {
 	RF69_LINK_BUS_ERROR,     /* the SPI transfer itself failed */
 };
 
+enum rf69_dio1_state {
+	RF69_DIO1_OK = 0,        /* line follows FifoNotEmpty */
+	RF69_DIO1_NOT_WIRED,     /* internal flag toggles, GPIO does not */
+	RF69_DIO1_STUCK_HIGH,
+	RF69_DIO1_STUCK_LOW,
+	RF69_DIO1_NO_GPIO,       /* not described in devicetree */
+	RF69_DIO1_INCONCLUSIVE,  /* the radio's own flag never changed */
+};
+
 struct rf69_selftest {
 	/* Layer 1: is anything there at all */
 	enum rf69_link_state link;
@@ -80,9 +90,16 @@ struct rf69_selftest {
 	int16_t rssi_dbm;
 	bool rssi_plausible;
 
-	/* Layer 6: is the DIO0 interrupt line wired */
-	int dio0_level;               /* -1 if unreadable */
-	bool dio0_readable;
+	/* Layer 6: is the DIO1 interrupt line physically wired?
+	 *
+	 * DIO1 is mapped to FifoNotEmpty, which we can drive deterministically:
+	 * pushing a byte into the FIFO must take the line high, draining it must
+	 * take it low. Each step is cross-checked against REG_IRQFLAGS2 over SPI,
+	 * so a radio fault is distinguishable from a missing wire.
+	 */
+	enum rf69_dio1_state dio1;
+	int dio1_low_level, dio1_high_level;   /* observed GPIO levels */
+	bool dio1_flag_toggled;                /* internal flag did change */
 
 	bool all_passed;
 };
@@ -105,7 +122,10 @@ int rf69_selftest_run(struct rf69_selftest *out);
 /** @brief Log a human-readable self-test report, with fault hints on failure. */
 void rf69_selftest_report(const struct rf69_selftest *r);
 
-/* --- register / mode primitives, for the Phase 4 packet path --- */
+/* RFM69 hardware FIFO depth. Legacy RF_MODULE_FIFO_SIZE. */
+#define RF69_FIFO_SIZE 66
+
+/* --- register / mode primitives --- */
 
 int rf69_read_reg(uint8_t addr, uint8_t *value);
 int rf69_write_reg(uint8_t addr, uint8_t value);
@@ -114,7 +134,31 @@ int rf69_config_916(void);
 uint32_t rf69_get_freq(void);
 int rf69_set_freq(uint32_t freq_hz);
 int16_t rf69_read_rssi(bool trigger);
-int rf69_dio0_get(void);
+int rf69_dio1_get(void);
+
+/** @brief Deterministically verify the DIO1 line via FifoNotEmpty. */
+enum rf69_dio1_state rf69_dio1_check(struct rf69_selftest *r);
+
+/* --- FIFO --- */
+
+int rf69_fifo_write(const uint8_t *data, uint16_t len);
+int rf69_fifo_write_byte(uint8_t b);
+int rf69_fifo_read_byte(uint8_t *b);
+bool rf69_fifo_is_empty(void);
+bool rf69_fifo_is_full(void);
+int rf69_fifo_clear(void);
+int rf69_set_payload_len(uint8_t len);
+int rf69_set_power_level(uint8_t level);
+bool rf69_packet_sent(void);
+
+/* --- DIO1 interrupt ---
+ *
+ * The legacy hardware never routed DIO0, so the driver busy-polled REG_IRQFLAGS2
+ * over SPI. On this board DIO0 is wired, so RX can block on a semaphore instead
+ * of spinning. See docs/aps-protocol-spec.md section 6.2.
+ */
+int rf69_dio1_irq_enable(struct k_sem *sem);
+int rf69_dio1_irq_disable(void);
 
 #ifdef __cplusplus
 }

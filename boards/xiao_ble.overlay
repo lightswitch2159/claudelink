@@ -86,7 +86,8 @@
 		reg = <0>;
 		spi-max-frequency = <4000000>;
 		band = "916";
-		dio0-gpios = <&xiao_d 2 GPIO_ACTIVE_HIGH>;   /* D2 = P0.28 */
+		/* DIO1 = FifoNotEmpty. See the binding for why DIO1 and not DIO0. */
+		dio1-gpios = <&xiao_d 2 GPIO_ACTIVE_HIGH>;   /* D2 = P0.28 */
 	};
 };
 
@@ -170,7 +171,7 @@
  * ---------------------------------------------------------------------------
  *   D0  P0.02   RFM69 NSS              D6  P1.11   UART TX (console)
  *   D1  P0.03   free                   D7  P1.12   UART RX (console)
- *   D2  P0.28   RFM69 DIO0 IRQ         D8  P1.13   SPI SCLK
+ *   D2  P0.28   RFM69 DIO1 IRQ         D8  P1.13   SPI SCLK
  *   D3  P0.29   free                   D9  P1.14   SPI MISO
  *   D4  P0.04   PWM motor (ext driver)  D10 P1.15   SPI MOSI
  *   D5  P0.05   PWM buzzer
@@ -193,8 +194,11 @@
  * costs no header pins -- freeing both D6 and D7. That trades roughly 15 KB of
  * flash for the USB stack, which on a 1 MB part is affordable.
  *
- * The DIO0 lines are new. The legacy board never routed them, which is why the
- * driver busy-polls REG_IRQFLAGS2 over SPI and Subg_GetPkt() blocks for
- * seconds. See docs/aps-protocol-spec.md section 6.2.
+ * The DIO1 interrupt line is new -- the legacy board routed no DIO at all, which
+ * is why its driver busy-polled REG_IRQFLAGS2 over SPI and Subg_GetPkt() blocked
+ * for seconds. DIO1 is mapped to FifoNotEmpty; DIO0's PayloadReady is useless
+ * here because the framing is variable length under a fixed PayloadLength.
+ * DIO0 remains free on the module, as do D1 and D3 on the XIAO, if TX-done via
+ * PacketSent is ever wanted on its own line.
  * ---------------------------------------------------------------------------
  */

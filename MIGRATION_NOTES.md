@@ -605,3 +605,137 @@ Legacy accepted three bands and switched radio mode accordingly. Only 914-918 MH
 is accepted now; anything else is logged and discarded, leaving the fitted radio
 untouched. `CMD_UPDATE_REG` address `0x0C` value `0x59` reapplies the 916 config
 instead of switching to the 868 MHz Minimed WWL table.
+
+---
+
+## 9. Sub-GHz packet path, DIO1, and a 10x TX airtime fix
+
+`src/subg/subg.c` ports the Minimed TX/RX paths and wires the three radio APS
+commands to them. Verified by an RF-free loopback that runs at boot once the
+RFM69 self-test passes. **All stages pass on hardware.**
+
+### 9.1 The interrupt line is DIO1, not DIO0 -- and that is better
+
+The overlay originally specified DIO0. The board is wired to **DIO1**, and DIO1 is
+the correct choice for this design:
+
+| Line | Packet-mode mappings |
+|---|---|
+| DIO0 | RX: `CrcOk` / `PayloadReady` / `SyncAddress` / `Rssi`; TX: `PacketSent` |
+| DIO1 | `FifoLevel` / `FifoFull` / **`FifoNotEmpty`** |
+
+Minimed framing is variable length, terminated by `0x00`, under a fixed
+`PayloadLength`. So DIO0's `PayloadReady` **never asserts for a normal short
+packet** -- which is exactly why the first version of the RX loop had to poll
+`FifoNotEmpty` over SPI every 250 us. `FifoNotEmpty` on DIO1 asserts the moment a
+byte lands, whatever the eventual length, so receive is now genuinely
+interrupt-driven. That is the mitigation for the top risk identified in Phase 0.
+
+`RegDioMapping1` now writes `DIO0_00 | DIO1_10` -- a **deviation from the legacy
+table**, which wrote `DIO0_00` only and left DIO1 at its `0b00` default of
+`FifoLevel`.
+
+TX completion goes back to polling `PacketSent`, since DIO1 cannot signal it.
+DIO0 is still unconnected on the module and D1/D3 are free on the XIAO if TX
+latency ever justifies its own line.
+
+### 9.2 `FifoNotEmpty` is a level, not a pulse
+
+The edge only arrives on the empty-to-non-empty transition. If bytes keep
+arriving while the loop drains, the line stays high and no further edge is
+generated -- so waiting on the semaphore alone would block on an edge that has
+already passed. The loop therefore waits on the semaphore with a bounded 2 ms
+fallback and re-checks the FIFO each pass: interrupt latency in the common case,
+immune to the race. Either way the thread sleeps, so the Bluetooth threads keep
+running.
+
+### 9.3 A weak self-test check hid an unconnected pin
+
+The first DIO check just read the GPIO level and reported
+`[PASS] dio0 level=0`. **A floating input reads something**, so it passed on a pin
+that was not connected to anything. What actually caught it was the loopback's
+interrupt stage, and only because that was reported as a separate line rather than
+folded into the overall pass.
+
+Replaced with a deterministic test, made possible by DIO1 carrying a signal we
+control completely: drain the FIFO and the line must read low; push one byte and it
+must read high. Each step is cross-checked against `REG_IRQFLAGS2` over SPI, so
+"the radio's flag never moved" (inconclusive) is distinguishable from "the flag
+moved but the pin did not" (not wired), as are stuck-high and stuck-low. Result on
+hardware: `[PASS] dio1 wiring follows FifoNotEmpty (low=0 high=1)`.
+
+**Lesson: a self-test that samples a passive state proves almost nothing. Drive
+the thing to a known state and check it followed.**
+
+### 9.4 TX was sending 255-byte frames: 136 ms -> 13 ms
+
+The loopback reported `PacketSent asserted after 136000 us` for a 4-byte payload.
+At 16384 bps that should be about 6 ms. 136 ms is almost exactly 255 bytes of
+airtime.
+
+Cause: the 916 config uses `PACKET1_FORMAT_FIXED` with `PAYLOADLENGTH = 0xFF`, and
+the legacy driver **never set `PayloadLength` for TX**. So every transmission sent
+a full 255-byte frame, padding the tail with whatever the underrunning FIFO
+produced.
+
+The legacy firmware hid this: `wait_tx_done()` only waited for the FIFO to *drain*,
+and `rf_stop()` then forced SLEEP, truncating the transmission mid-packet. That
+works against a receiver which stops at the zero terminator, but it wastes airtime,
+radiates padding, and makes the send-and-listen turnaround far slower than
+necessary.
+
+`minimed_tx()` now sets `PayloadLength` to the real frame size (data + terminator).
+Measured **136 ms -> 13 ms**, a 10x reduction in airtime and turnaround.
+
+> **DEVIATION to validate against the 722.** The pump has only ever seen the
+> truncated-255 behaviour. If it turns out to depend on that tail, revert to
+> drain-then-STANDBY. This is the first thing to check when real pump testing
+> starts.
+
+### 9.5 The loopback was testing a parallel reimplementation
+
+The TX stage originally did its own FIFO write and mode change instead of calling
+`subg_send_pkt()`. So it silently skipped the `PayloadLength` fix and kept
+reporting `PASS` at 136 ms -- a green test that said nothing about the code that
+actually runs. It now calls the production function.
+
+**Lesson: a hardware test that reimplements the path it is testing will pass while
+the real path is broken.**
+
+### 9.6 Zero-length receive no longer reports success
+
+Legacy `minimed_rx()` returned `SUBG_RX_OK` even when zero bytes were received,
+leaving `*pRxLen` untouched -- so the caller transmitted whatever was on its stack.
+Reported as `SUBG_RX_TIMEOUT` here instead.
+
+### 9.7 Other preserved behaviour
+
+- Zero-terminated framing: TX appends `0x00`, RX stops at the first `0x00`
+- End-of-packet glitch trim: a trailing `0x80` or `0xC0` is an OOK demodulation
+  artefact and is dropped
+- Trailing zero stripped from the caller's payload before encoding, since the radio
+  layer appends its own terminator
+- `CMD_SEND_AND_LISTEN` retry loop resends with `repeatCnt` forced to 0
+- Aborting an in-flight receive when BLE drops produces `CMD_INTERRUPTED` (0xBB)
+- CC111x RSSI encoding `(dBm + 73) * 2`, truncation included
+
+Radio command parameters are parsed with `sys_get_be16/32`, not by overlaying a
+packed struct and byte-swapping in place -- see section 2.5.
+
+### First hardware result
+
+```
+[PASS] fifo byte      wrote 0x5c read 0x5c
+[PASS] fifo burst     16/16 bytes matched
+[PASS] fifo flags     empty/not-empty track content
+[PASS] datapath NONE  encode -> fifo -> decode
+[PASS] datapath MANCH encode -> fifo -> decode
+[PASS] datapath 4B6B  encode -> fifo -> decode
+[PASS] dio1 interrupt fires on FifoNotEmpty edge
+[PASS] tx complete    PacketSent asserted after 13000 us
+---- ALL PASSED ----
+```
+
+The loopback proves the FIFO, the encode/decode chain and the DIO1 interrupt. It
+does **not** prove receiver sensitivity or interoperability -- both need the
+Minimed 722.

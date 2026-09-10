@@ -17,13 +17,17 @@ compatible: "orangelink,rfm69"
 include: spi-device.yaml
 
 properties:
-  dio0-gpios:
+  dio1-gpios:
     type: phandle-array
     description: |
-      DIO0 interrupt line from the radio. The legacy hardware never routed this
-      and the driver busy-polled REG_IRQFLAGS2 over SPI instead, which is the
-      root of the blocking-RX problem documented in docs/aps-protocol-spec.md
-      section 6.2. Required on new hardware.
+      DIO1 interrupt line from the radio, mapped to FifoNotEmpty.
+
+      DIO1 rather than DIO0 on purpose. Minimed framing is variable length and
+      zero-terminated under a fixed PayloadLength of 107, so DIO0's PayloadReady
+      never asserts for a normal short packet. DIO1/FifoNotEmpty asserts as soon
+      as a byte lands regardless of eventual packet length, which is what lets
+      receive be interrupt-driven instead of polled. See
+      docs/aps-protocol-spec.md section 6.2.
 
   reset-gpios:
     type: phandle-array
