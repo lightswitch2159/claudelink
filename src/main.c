@@ -19,6 +19,7 @@
 #include <string.h>
 
 #include "ble/ips.h"
+#include "drivers/rf69/rf69.h"
 
 LOG_MODULE_REGISTER(main, CONFIG_ORANGELINK_LOG_LEVEL);
 
@@ -230,6 +231,52 @@ static void ips_event_handler(const struct ips_evt *evt)
 }
 
 /* ------------------------------------------------------------------------- *
+ * RFM69 self-test
+ *
+ * Run at boot, then re-run every 5 s for as long as it fails. That way the radio
+ * can be wired up (or fixed) with the board already powered and the result is
+ * visible in the log without a reflash. Once it passes, the retry stops.
+ * ------------------------------------------------------------------------- */
+
+#define RF69_RETEST_INTERVAL_MS 5000
+
+static void rf69_check_fn(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(rf69_check_work, rf69_check_fn);
+
+static void rf69_check_fn(struct k_work *work)
+{
+	static bool passed_once;
+	static unsigned int attempt;
+	struct rf69_selftest r;
+
+	ARG_UNUSED(work);
+	attempt++;
+
+	if (rf69_selftest_run(&r) == 0) {
+		if (!passed_once) {
+			LOG_INF("RFM69 self-test passed on attempt %u", attempt);
+			rf69_selftest_report(&r);
+			passed_once = true;
+		}
+		return;   /* stop retrying */
+	}
+
+	/* Full report on the first failure; a one-line reminder afterwards so the
+	 * log stays readable while waiting for the module to be connected.
+	 */
+	if (attempt == 1) {
+		rf69_selftest_report(&r);
+		LOG_WRN("retrying every %u ms until the RFM69 responds",
+			RF69_RETEST_INTERVAL_MS);
+	} else {
+		LOG_WRN("RFM69 still not ready (attempt %u, REG_VERSION=0x%02x)",
+			attempt, r.version);
+	}
+
+	k_work_reschedule(&rf69_check_work, K_MSEC(RF69_RETEST_INTERVAL_MS));
+}
+
+/* ------------------------------------------------------------------------- *
  * Entry point
  * ------------------------------------------------------------------------- */
 
@@ -255,6 +302,14 @@ int main(void)
 	if (err) {
 		return err;
 	}
+
+	/* Sub-GHz radio. Failure is not fatal: BLE stays up so the device remains
+	 * reachable and the self-test keeps retrying in the background.
+	 */
+	if (rf69_init() != 0) {
+		LOG_ERR("RFM69 SPI bus unavailable");
+	}
+	k_work_schedule(&rf69_check_work, K_NO_WAIT);
 
 	/*
 	 * Nothing to do in the main thread. The legacy super-loop called

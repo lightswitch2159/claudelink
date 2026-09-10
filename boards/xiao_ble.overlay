@@ -74,34 +74,19 @@
  */
 &spi2 {
 	status = "okay";
-	cs-gpios = <&xiao_d 0 GPIO_ACTIVE_LOW>,   /* D0 = P0.02 -> radio 0 NSS */
-	           <&xiao_d 1 GPIO_ACTIVE_LOW>;   /* D1 = P0.03 -> radio 1 NSS */
+	cs-gpios = <&xiao_d 0 GPIO_ACTIVE_LOW>;   /* D0 = P0.02 -> RFM69 NSS */
 
-	/* 433 MHz -- Omnipod. Legacy RF69_DEV_FREQ433 == device 0. */
-	rf69_433: rf69@0 {
+	/*
+	 * Single RFM69 for 916 MHz Minimed. Project scope is 916 MHz only, so the
+	 * legacy second radio (433 MHz / Omnipod, RF69_DEV_FREQ433) is not fitted and
+	 * is not represented here. D1 and D3 are consequently free.
+	 */
+	rf69: rf69@0 {
 		compatible = "orangelink,rfm69";
 		reg = <0>;
 		spi-max-frequency = <4000000>;
-		band = "433";
-		dio0-gpios = <&xiao_d 2 GPIO_ACTIVE_HIGH>;   /* D2 = P0.28 */
-		/* reset-gpios deliberately omitted -- see the pin note at the end
-		 * of this file. Tie RFM69 RESET low (inactive) in hardware.
-		 */
-	};
-
-	/*
-	 * 868/916 MHz -- Minimed. Legacy RF69_DEV_FREQ916N868 == device 1.
-	 * Band is tagged 916 here; the application retunes between 868 and 916 at
-	 * runtime from the CMD_UPDATE_REG frequency registers, so this only records
-	 * which radio is fitted for the Minimed bands.
-	 */
-	rf69_916: rf69@1 {
-		compatible = "orangelink,rfm69";
-		reg = <1>;
-		spi-max-frequency = <4000000>;
 		band = "916";
-		dio0-gpios = <&xiao_d 3 GPIO_ACTIVE_HIGH>;   /* D3 = P0.29 */
-		/* reset-gpios deliberately omitted -- see the pin note below. */
+		dio0-gpios = <&xiao_d 2 GPIO_ACTIVE_HIGH>;   /* D2 = P0.28 */
 	};
 };
 
@@ -181,12 +166,12 @@
 
 /*
  * ---------------------------------------------------------------------------
- * PIN ALLOCATION -- 9 of 11 header pins used
+ * PIN ALLOCATION -- 7 of 11 header pins used (916 MHz, single radio)
  * ---------------------------------------------------------------------------
- *   D0  P0.02   RFM69 433    NSS        D6  P1.11   UART TX (console)
- *   D1  P0.03   RFM69 916    NSS        D7  P1.12   UART RX (console)
- *   D2  P0.28   RFM69 433    DIO0 IRQ   D8  P1.13   SPI SCLK
- *   D3  P0.29   RFM69 916    DIO0 IRQ   D9  P1.14   SPI MISO
+ *   D0  P0.02   RFM69 NSS              D6  P1.11   UART TX (console)
+ *   D1  P0.03   free                   D7  P1.12   UART RX (console)
+ *   D2  P0.28   RFM69 DIO0 IRQ         D8  P1.13   SPI SCLK
+ *   D3  P0.29   free                   D9  P1.14   SPI MISO
  *   D4  P0.04   PWM motor (ext driver)  D10 P1.15   SPI MOSI
  *   D5  P0.05   PWM buzzer
  *

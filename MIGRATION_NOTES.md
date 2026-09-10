@@ -431,3 +431,90 @@ host is enumerating it, consistent with a charge-only USB-C cable.
 Two follow-ups: this costs flash and RAM for nothing today and could be disabled;
 or, if USB CDC is adopted as the console, it frees D6/D7 and gives a second DFU
 path. Decide in Phase 5.
+
+---
+
+## 7. Scope narrowed to 916 MHz, single radio
+
+Project scope is **916 MHz Minimed only**. The legacy design fitted **two** RFM69
+modules -- `RF69_DEV_FREQ433` (Omnipod) and `RF69_DEV_FREQ916N868` (Minimed) --
+each with its own chip select. Only one is fitted now.
+
+Not ported, deliberately:
+
+- the 433 MHz (`freq433CfgTbl`) and 868 MHz (`freq868CfgTbl`) register tables
+- the second radio instance, its chip select and its DIO0 line
+- Omnipod-specific paths in `app_subg.c` (`omnipod_rx`, the 80-byte packet mode)
+- `SUBG_MODE_OMNIPOD` and `SUBG_MODE_MINIMED_WWL`
+
+Pin usage drops to **7 of 11** header pins; D1 and D3 are now free.
+
+`4b6b.c` and `manchester.c` are both **kept**. Encoding is selected at runtime by
+the host via `CMD_SET_SW_ENCODING` and is independent of band, so dropping either
+would break commands the host may legitimately send.
+
+### 916 MHz configuration
+
+Transcribed unchanged from `freq916CfgTbl`: OOK modulation, 16384 bps,
+`FRF = 0xE52312`, fixed-length packets, CRC off, 4-byte sync word `FF 00 FF 00`,
+RSSI threshold 228 (-114 dBm), DIO0 mapped to the packet interrupt.
+
+`FSTEP` is computed with integer math -- `(frf * 32 MHz) >> 19` -- rather than the
+legacy `float RF69_FSTEP = 61.03515625`. Exact, and no FPU dependency in what
+becomes an interrupt-adjacent path. Note the RFM69's 32 MHz crystal is a different
+thing from the 24 MHz `RILEY_LINK_FXOSC` the APS layer uses to decode CC111x-style
+register values; conflating them would put the radio ~25% off frequency.
+
+### Layered self-test
+
+`rf69_selftest_run()` / `rf69_selftest_report()` verify the module in stages, so a
+failure points at a specific fault rather than just "not working":
+
+| Stage | Checks | A failure means |
+|---|---|---|
+| 1 | `REG_VERSION == 0x24` | `0x00` unpowered or MISO not connected; `0xFF` MISO floating or MOSI/SCLK/NSS not arriving; other value = wrong device or MOSI/MISO swapped |
+| 2 | write/read-back of a sync-word byte | reads work, writes do not -- check MOSI |
+| 3 | apply 916 table, read FRF back | multi-register writes not landing |
+| 4 | `ModeReady` asserts | SPI fine but the 32 MHz crystal is not oscillating |
+| 5 | RSSI reads | see the caveat below |
+| 6 | DIO0 GPIO readable | line not wired |
+
+Run at boot and re-run every 5 s **for as long as it fails**, so the module can be
+connected with the board already powered and the result watched live in the log.
+Retries stop on the first pass.
+
+The legacy driver's unbounded `while ((REG_IRQFLAGS1 & MODEREADY) == 0);` spin is
+now bounded -- an unpopulated or dead radio hung the original firmware.
+
+> **Caveat on stage 5.** An idle band reads the noise floor (-127 dBm observed),
+> which the plausibility check accepts. It proves the RSSI register responds; it
+> does **not** prove the receiver has sensitivity. Real validation needs a known
+> transmitter and belongs in Phase 6 against pump hardware.
+
+### First hardware result
+
+```
+[PASS] present        REG_VERSION=0x24 (RFM69/SX1231)
+[PASS] spi read/write  wrote 0xa5, read 0xa5
+[PASS] 916 MHz config applied 24 registers
+[PASS] frequency      916547973 Hz (expected 916548000)
+       FRF read back 0xe52312
+       FRF written   0xe52312
+[PASS] radio alive    ModeReady after 0 us
+[PASS] rssi           -127 dBm
+[PASS] dio0           level=0
+---- ALL PASSED ----
+```
+
+The 27 Hz difference is integer truncation in the FSTEP conversion.
+
+### Trap: deferred logging silently drops oversized messages
+
+An intermediate version printed the frequency and the raw FRF bytes in one
+`LOG_INF` with nine arguments. Under `CONFIG_LOG_MODE_DEFERRED` that message was
+**mangled rather than dropped** -- it reported a plausible-looking but wrong
+`915000000 Hz`, which briefly looked like a real frequency bug. Splitting it into
+three shorter lines showed the frequency had been correct all along.
+
+Keep log calls to a handful of arguments, and treat a suspicious value in a
+long-format log line as a logging problem before believing it.
