@@ -338,3 +338,96 @@ PHY update -- matching legacy behaviour (see section 1.2).
    `CONFIG_FLASH_LOAD_OFFSET=0xc000`, splitting its image across `0x0` and slot0 --
    a build that passed cleanly and would not have booted. The chosen now lives in
    an app-image-only overlay. **Check link addresses, not just build success.**
+
+---
+
+## 6. Hardware validation on XIAO nRF52840
+
+First run on real hardware. Probe: Raspberry Pi Pico (RP2040) with `debugprobe`
+v2.3.1, driven by pyOCD 0.45.1.
+
+Target identified over SWD as **nRF52840 QIAA D0**, `INFO.PART = 0x00052840`,
+`DEVICEID[0] = 0x7ddb79df`.
+
+### The board arrived APPROTECT-locked
+
+`pyocd` reported `NRF52840 APPROTECT enabled: not automatically unlocking`. D0 is a
+revision with **hardware APPROTECT, enabled from the factory**, so a CTRL-AP mass
+erase is required before any debug access:
+
+```bash
+pyocd erase --mass -t nrf52840 -O auto_unlock=1
+```
+
+This very likely explains why the board never enumerated over USB: with a locked
+and effectively empty part there was no application to bring USB up, and no
+bootloader to answer a double-tap either.
+
+The mass erase also removed the Adafruit UF2 bootloader, so **the plain
+non-MCUboot build can no longer boot** -- it links at `0x27000` and depended on
+that bootloader to jump there. MCUboot builds are self-contained from reset and
+are now the only bootable variant unless the UF2 bootloader is restored over SWD.
+
+### Verified working
+
+| Step | Result |
+|---|---|
+| MCUboot + signed app flashed over SWD | 40,960 B + 180,224 B programmed |
+| MCUboot verified the ECDSA P-256 signature and booted the app | yes |
+| BLE advertising | `E6:B5:4D:8C:C1:B9` as `OrangePro` |
+| IPS GATT service vs docs/gatt-service-spec.md | **41/41 checks pass** |
+| Encoding round-trip tests on native_sim | 9/9 pass |
+
+`tools/verify_gatt.py` performs the GATT check against live hardware: all six
+128-bit UUIDs, properties, declaration order, User Description strings, CCCD
+presence, `"ble_rfspy 2.0"`, and that an over-length Data write is **rejected**
+(the guard closing the legacy overflow). Re-run it after any change to
+`src/ble/ips.c`.
+
+Footprint with RTT enabled: application **179,628 B of 442,218 B (40.6%)**,
+RAM **41,772 B of 256 KB (15.9%)**; MCUboot **39,664 B of 48 KB (80.7%)**.
+
+### 6.1 Bug found on hardware: advertising did not restart after disconnect
+
+`bt_le_adv_start()` was being called directly from the `disconnected` connection
+callback. The device advertised correctly at boot, accepted one connection, and
+then went silent permanently -- the callback runs while the connection object is
+still being torn down, so the restart fails.
+
+Fixed by deferring to the system workqueue (`k_work_submit`), and `-EALREADY` is
+now treated as success. Confirmed in the RTT log:
+
+```
+<inf> main: disconnected (reason 0x13)
+<inf> main: advertising as "OrangePro" at 300 ms
+```
+
+This class of bug is invisible to a build and to a single-connection test. Any
+future change to connection handling should be checked with a
+connect / disconnect / rescan cycle, which `tools/verify_gatt.py` now exercises.
+
+### 6.2 RTT logging over SWD
+
+The XIAO has no debug header and the UART would need two more flying leads to
+tiny pads, so RTT is the practical console: it rides the SWD link already in
+place. `CONFIG_USE_SEGGER_RTT` + `CONFIG_LOG_BACKEND_RTT`, ~1.3 KB flash and
+~2.3 KB RAM.
+
+pyOCD's `rtt` subcommand requires a TTY and dies with
+`Inappropriate ioctl for device` when run without one, including with stdin
+redirected. Run it under a pty:
+
+```bash
+script -qec "pyocd rtt -t nrf52840" /dev/null
+```
+
+### 6.3 Observation: the USB stack is being built in
+
+The RTT log shows `udc_nrf: Preinit` / `Initialized` / `SUSPEND state detected`.
+The board devicetree includes `cdc_acm_serial.dtsi`, so the USB device controller
+is initialised even though nothing in the application uses it. `SUSPEND` means no
+host is enumerating it, consistent with a charge-only USB-C cable.
+
+Two follow-ups: this costs flash and RAM for nothing today and could be disabled;
+or, if USB CDC is adopted as the console, it frees D6/D7 and gives a second DFU
+path. Decide in Phase 5.

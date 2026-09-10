@@ -83,6 +83,10 @@ static int advertising_start(void)
 {
 	int err = bt_le_adv_start(adv_param, adv_data, ARRAY_SIZE(adv_data),
 				  scan_rsp, ARRAY_SIZE(scan_rsp));
+	if (err == -EALREADY) {
+		LOG_DBG("advertising already active");
+		return 0;
+	}
 	if (err) {
 		LOG_ERR("advertising start failed (%d)", err);
 		return err;
@@ -92,6 +96,21 @@ static int advertising_start(void)
 		bt_get_name(), (ORANGELINK_ADV_INTERVAL * 625) / 1000);
 	return 0;
 }
+
+/*
+ * Advertising must NOT be restarted from inside the disconnected callback.
+ *
+ * Found on hardware: after the first disconnect the device stopped advertising
+ * entirely and had to be reset. Calling bt_le_adv_start() from the callback runs
+ * while the connection object is still being torn down and fails. Deferring to
+ * the system workqueue lets the teardown complete first.
+ */
+static void adv_work_fn(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	advertising_start();
+}
+static K_WORK_DEFINE(adv_work, adv_work_fn);
 
 /* ------------------------------------------------------------------------- *
  * Connection handling
@@ -142,7 +161,8 @@ static void on_disconnected(struct bt_conn *conn, uint8_t reason)
 		}
 	}
 
-	advertising_start();
+	/* Deferred deliberately -- see adv_work_fn(). */
+	k_work_submit(&adv_work);
 }
 
 static void on_le_param_updated(struct bt_conn *conn, uint16_t interval,
