@@ -518,3 +518,90 @@ three shorter lines showed the frequency had been correct all along.
 
 Keep log calls to a handful of arguments, and treat a suspicious value in a
 long-format log line as a logging problem before believing it.
+
+---
+
+## 8. APS command layer ported and verified over BLE
+
+`src/aps/aps.c` replaces `legacy/project/app/src/app_aps.c`. Wire format is
+unchanged; `tools/verify_aps.py` drives it over BLE and checks every response
+against docs/aps-protocol-spec.md. **25/25 checks pass on hardware.**
+
+### Verified end to end
+
+```
+CMD_GET_VER          -> b'\xddsubg_rfspy 2.2'
+CMD_GET_STATE        -> b'\xddOK'
+CMD_GET_STATISTICS   -> [0xDD] + 20 bytes, big-endian decode correct
+CMD_READ_REG(0x09)   -> b'\xdd\x12'   (default frequency register)
+CMD_READ_REG(0x42)   -> b'\xddZ'      (the 0x5A stub, unchanged)
+CMD_SET_SW_ENCODING  -> 0xDD for NONE/MANCHESTER/4B6B, 0x11 for invalid
+CMD_LED, CMD_SET_MODE_REG, CMD_RESET_RADIO_CFG -> 0xDD
+Response Count       -> increments exactly one per response, notifies
+```
+
+Legacy quirks confirmed preserved, all three verified as *silent*:
+`CMD_RESET` (0x07, no dispatch case), unknown opcodes, and `CMD_UPDATE_REG` with a
+short frame. Each leaves the client to time out, exactly as before.
+
+### The host -> firmware -> radio frequency path works
+
+The host sets frequency through CC111x-style registers where
+`freq = reg * 24 MHz / 2^16`. Writing `0x09/0x0A/0x0B = 26 30 00` produced:
+
+```
+<inf> aps: tuning to 916500000 Hz
+```
+
+and the RFM69 was retuned. Writing the legacy default `12 14 83` produced:
+
+```
+<wrn> aps: frequency 433922973 Hz outside the 916 MHz band, ignored
+```
+
+That 433,922,973 Hz is a useful cross-check: it matches the documented 433.92 MHz
+legacy default, confirming the register-to-frequency arithmetic, and the 916-only
+guard correctly refuses it rather than mistuning the fitted radio.
+
+### Deviations
+
+#### 8.1 Dedicated thread instead of a 10 ms polling timer
+
+Legacy drained a 1-deep FIFO from an `app_timer` callback every 10 ms.
+`CMD_GET_PKT` and `CMD_SEND_AND_LISTEN` block for a client-supplied timeout, so
+this work cannot live on the system workqueue without starving everything else on
+it. APS now has its own thread at priority 7 -- below the Bluetooth RX thread, so
+the link keeps servicing ATT while the radio listens. Queue depth stays at 1, so
+commands arriving while one is in flight are still dropped as before.
+
+#### 8.2 `CMD_UPDATE_REG` is now queued, not immediate
+
+Legacy executed it synchronously inside the BLE callback, where it could drive the
+RFM69 over SPI while the command loop was mid-transaction on the same bus, with no
+lock. It is queued like every other command now, so all radio access is serialised
+onto the APS thread. Costs up to one queue hop of latency. Verify no client
+depends on the old synchronous timing.
+
+#### 8.3 Bounds check added (the overflow fix)
+
+`aps_put_cmd()` rejects any frame whose parameter length exceeds
+`APS_MAX_PARAM_LEN` (123) and answers `PARAM_ERROR`. The legacy
+`memcpy(req.pkt, pBuf + 2, len - 2)` had no such check and the Data
+characteristic accepts up to 150 bytes -- a 25-byte stack overflow reachable over
+an unauthenticated link. The IPS write callback rejects over-length writes as a
+second, independent layer; `verify_aps.py` confirms a 200-byte write is refused
+at ATT.
+
+#### 8.4 Radio commands answer RX_TIMEOUT while the packet path is unported
+
+`CMD_GET_PKT`, `CMD_SEND_PKT` and `CMD_SEND_AND_LISTEN` return `0xAA` and log
+plainly that the sub-GHz path is missing. The wire format is already correct so a
+host sees a well-formed "nothing received" rather than hanging -- but this must not
+be mistaken for working radio traffic. **These are the next thing to implement.**
+
+#### 8.5 Band handling is narrowed
+
+Legacy accepted three bands and switched radio mode accordingly. Only 914-918 MHz
+is accepted now; anything else is logged and discarded, leaving the fitted radio
+untouched. `CMD_UPDATE_REG` address `0x0C` value `0x59` reapplies the 916 config
+instead of switching to the 868 MHz Minimed WWL table.

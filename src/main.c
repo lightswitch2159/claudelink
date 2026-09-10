@@ -20,6 +20,7 @@
 
 #include "ble/ips.h"
 #include "drivers/rf69/rf69.h"
+#include "aps/aps.h"
 
 LOG_MODULE_REGISTER(main, CONFIG_ORANGELINK_LOG_LEVEL);
 
@@ -128,8 +129,10 @@ static void on_connected(struct bt_conn *conn, uint8_t err)
 	LOG_INF("connected");
 
 	/* Legacy started the APS and config command loops plus the battery timer
-	 * here. The Timer Tick is the only one that exists so far.
+	 * here. Aps_StartLoop() gated command processing on an active connection;
+	 * preserved so frames outside a connection are dropped as before.
 	 */
+	aps_set_active(true);
 	ips_timer_tick_start();
 }
 
@@ -142,6 +145,7 @@ static void on_disconnected(struct bt_conn *conn, uint8_t reason)
 		current_conn = NULL;
 	}
 
+	aps_set_active(false);
 	ips_timer_tick_stop();
 
 	if (name_change_pending) {
@@ -199,12 +203,7 @@ static void ips_event_handler(const struct ips_evt *evt)
 	switch (evt->type) {
 	case IPS_EVT_DATA_RX:
 		LOG_HEXDUMP_DBG(evt->data, evt->len, "Data write");
-		/*
-		 * TODO(phase4): Aps_PutCmd(evt->data, evt->len, evt->rssi).
-		 * The APS parser must bound-check before copying -- the legacy
-		 * Aps_PutCmd() did not, which is the overflow in
-		 * docs/aps-protocol-spec.md section 7.
-		 */
+		aps_put_cmd(evt->data, evt->len, evt->rssi);
 		break;
 
 	case IPS_EVT_CUS_NAME_RX:
@@ -310,6 +309,8 @@ int main(void)
 		LOG_ERR("RFM69 SPI bus unavailable");
 	}
 	k_work_schedule(&rf69_check_work, K_NO_WAIT);
+
+	aps_init();
 
 	/*
 	 * Nothing to do in the main thread. The legacy super-loop called
