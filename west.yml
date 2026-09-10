@@ -1,0 +1,39 @@
+# West manifest for the Orangelink NCS fork.
+#
+# STATUS: NOT YET EXERCISED. Phase 0 did not install the toolchain, so this
+# manifest has never been run through `west update`. Treat it as a starting
+# point to be validated as the first task of Phase 1.
+#
+# Workspace topology: T2 "star" — this repository is the manifest repository and
+# NCS is imported as a dependency. This is what replaces the vendored 140k-line
+# nrfSDK/ directory that the legacy repo carried in-tree.
+#
+# First-time setup:
+#     west init -l /path/to/orangelink-ncs
+#     west update
+#     west zephyr-export
+#
+# Build (once the chip decision in docs/FEASIBILITY_REPORT.md §B1 is made):
+#     west build -b <board> --sysbuild
+#
+# NOTE ON VERSION: v3.4.0 is the LTS release and the last NCS version to add
+# features for the nRF52 Series (declared feature complete). If the nRF54L option
+# in FEASIBILITY_REPORT.md §6 is chosen instead, this manifest is replaced by the
+# separate nRF Connect SDK Bare Metal repository — not just a revision bump.
+
+manifest:
+  version: "1.0"
+
+  remotes:
+    - name: nrfconnect
+      url-base: https://github.com/nrfconnect
+
+  projects:
+    - name: nrf
+      remote: nrfconnect
+      repo-path: sdk-nrf
+      revision: v3.4.0
+      import: true
+
+  self:
+    path: orangelink-ncs

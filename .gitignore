@@ -1,0 +1,31 @@
+# --- Signing keys: NEVER commit a private key ---------------------------------
+# The legacy repo committed its DFU private keys in the clear. Do not repeat it.
+keys/*-priv.pem
+keys/*priv*.pem
+*.priv.pem
+private_*.pem
+# Public keys ARE tracked on purpose (keys/*-pub.pem, keys/*-pub.c).
+
+# --- West / Zephyr workspace ---------------------------------------------------
+.west/
+build/
+build-*/
+twister-out*/
+modules/
+zephyr/
+bootloader/
+nrf/
+nrfxlib/
+tools/
+
+# --- Python ------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# --- Editors / OS ------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+.DS_Store
