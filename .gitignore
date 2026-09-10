@@ -7,16 +7,23 @@ private_*.pem
 # Public keys ARE tracked on purpose (keys/*-pub.pem, keys/*-pub.c).
 
 # --- West / Zephyr workspace ---------------------------------------------------
+# The west workspace lives OUTSIDE this repo (as a sibling), so its directories
+# need no rules here. They are anchored with a leading slash anyway, so that a
+# stray `west init` inside the repo is still ignored -- and, crucially, so they
+# cannot shadow our own directories.
+#
+# An unanchored `tools/` here previously matched our tools/ and silently kept the
+# entire verification suite untracked. Anchor workspace paths; never bare names
+# that collide with project directories.
 .west/
-build/
+/build/
 build-*/
 twister-out*/
-modules/
-zephyr/
-bootloader/
-nrf/
-nrfxlib/
-tools/
+/modules/
+/zephyr/
+/bootloader/
+/nrf/
+/nrfxlib/
 
 # --- Python ------------------------------------------------------------------
 __pycache__/
