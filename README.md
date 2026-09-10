@@ -123,3 +123,107 @@ NCS and Zephyr are Apache 2.0. Whether these may be combined and distributed is
 top-level `LICENSE` file upstream.
 
 Original copyright: Fractal Auto Technology Co., Ltd. / Ribin Huang.
+
+---
+
+## Toolchain setup (verified working)
+
+Workspace lives **outside** this repo at `/home/user/ai/orangelink-ncs-ws`.
+Zephyr's build breaks on paths containing spaces, which is why it is not under
+the original `OL SDK Update/` directory.
+
+| Component | Version |
+|---|---|
+| nRF Connect SDK (`sdk-nrf`) | v3.4.0 |
+| Zephyr (`sdk-zephyr`) | ncs-v3.4.0 / 4.4.0 |
+| Zephyr SDK | 1.0.1 (`arm-zephyr-eabi-gcc` 14.3.0) |
+| Board | `xiao_ble` (upstream Zephyr, `seeed/xiao_ble`) |
+
+```bash
+. /home/user/ai/orangelink-ncs-ws/env.sh
+```
+
+### Build: plain application (USB-flashable, no MCUboot)
+
+Keeps the board's UF2 partition layout, so it can be flashed by drag-and-drop
+over USB. This is the bring-up path.
+
+```bash
+west build -b xiao_ble -d build orangelink-ncs
+```
+
+### Build: with MCUboot dual-slot, signed
+
+Replaces the UF2 bootloader, so **this variant requires SWD to flash**.
+
+```bash
+west build -b xiao_ble -d build-mcuboot --sysbuild orangelink-ncs -- -DSB_CONFIG_BOOTLOADER_MCUBOOT=y -DSB_CONFIG_BOOT_SIGNATURE_TYPE_ECDSA_P256=y -DSB_CONFIG_BOOT_SIGNATURE_KEY_FILE=\"$PWD/orangelink-ncs/keys/mcuboot-xiao-priv.pem\" -DEXTRA_DTC_OVERLAY_FILE="$PWD/orangelink-ncs/dts/orangelink-partitions.dtsi;$PWD/orangelink-ncs/dts/orangelink-app-slot0.overlay" -Dmcuboot_EXTRA_DTC_OVERLAY_FILE=$PWD/orangelink-ncs/dts/orangelink-partitions.dtsi
+```
+
+`orangelink-partitions.dtsi` goes to **both** images; `orangelink-app-slot0.overlay`
+to the **application only**. Sending the latter to MCUboot gives the bootloader
+`FLASH_LOAD_OFFSET=0xc000` and produces a clean build that does not boot.
+Always check link addresses after changing partitions.
+
+### Run the unit tests
+
+```bash
+west build -b native_sim -d build-tests orangelink-ncs/tests/encoding && ./build-tests/encoding/zephyr/zephyr.exe
+```
+
+## Debug probe: Raspberry Pi Pico as CMSIS-DAP
+
+The XIAO has no onboard debug probe. A Pico 1 (RP2040) flashed with Raspberry Pi
+`debugprobe` v2.3.1 (`debugprobe_on_pico.uf2`) works as a CMSIS-DAP probe and is
+driven by pyOCD, which has a builtin `nrf52840` target.
+
+Flash the Pico by holding BOOTSEL while plugging in, then copying the UF2 to the
+`RPI-RP2` volume. It returns as USB `2e8a:000c`.
+
+### One-time udev rule
+
+Without this, pyOCD reports "No available debug probes are connected" because
+`/dev/bus/usb/*` is root-only:
+
+```bash
+sudo install -m 644 /home/user/ai/orangelink-ncs-ws/orangelink-ncs/tools-udev-60-cmsis-dap.rules /etc/udev/rules.d/60-cmsis-dap.rules && sudo udevadm control --reload-rules && sudo udevadm trigger
+```
+
+### Wiring, Pico -> XIAO nRF52840
+
+Pico pins are fixed by the stock firmware (`board_pico_config.h`): SWCLK and
+SWDIO must be consecutive, `SWCLK = PROBE_PIN_OFFSET + 0`, `SWDIO = +1`.
+Changing them requires rebuilding debugprobe from source against the Pico SDK.
+
+| Signal | Pico GPIO | Pico physical pin |
+|---|---|---|
+| SWCLK | GP2 | 4 |
+| SWDIO | GP3 | 5 |
+| GND | — | 3 (or any GND) |
+| target RESET (optional) | GP1 | 2 |
+| UART TX -> target RX | GP4 | 6 |
+| UART RX <- target TX | GP5 | 7 |
+
+On the XIAO, SWDIO/SWCLK are **small test pads on the underside**. Published test
+point numbering is inconsistent between sources, so do not trust a TP map --
+including any in this file. Practical approach:
+
+- Take **GND from the castellated header pin**, which is clearly labelled. No need
+  to find a GND test pad.
+- Only **two** pads actually need soldering: SWDIO and SWCLK.
+- Swapping SWDIO and SWCLK cannot damage anything -- pyOCD simply fails to
+  connect. Try one orientation, swap if it fails.
+- **Do not connect the probe's 3V3** while the XIAO is powered over USB-C.
+  Dual-powering it has been reported to corrupt bootloaders. Power the XIAO from
+  USB-C (this works even with a charge-only cable) and connect only
+  SWDIO / SWCLK / GND.
+
+### Flash over SWD
+
+```bash
+pyocd flash --target nrf52840 build/orangelink-ncs/zephyr/zephyr.hex
+```
+
+```bash
+pyocd gdbserver --target nrf52840
+```

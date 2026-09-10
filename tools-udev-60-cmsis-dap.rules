@@ -1,0 +1,7 @@
+# CMSIS-DAP debug probes - grant console user access.
+# Raspberry Pi Debugprobe on Pico
+SUBSYSTEM=="usb", ATTR{idVendor}=="2e8a", ATTR{idProduct}=="000c", MODE="0666", TAG+="uaccess"
+# Raspberry Pi official Debug Probe
+SUBSYSTEM=="usb", ATTR{idVendor}=="2e8a", ATTR{idProduct}=="000f", MODE="0666", TAG+="uaccess"
+# RP2 BOOTSEL (so UF2 reflashing works without root)
+SUBSYSTEM=="usb", ATTR{idVendor}=="2e8a", ATTR{idProduct}=="0003", MODE="0666", TAG+="uaccess"
