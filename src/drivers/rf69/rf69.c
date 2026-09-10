@@ -221,6 +221,30 @@ static const uint8_t rf69_cfg_916[][2] = {
 	{ REG_TESTDAGC,      RF_DAGC_IMPROVED_LOWBETA0 },
 };
 
+/*
+ * Set RegPaLevel for the fitted module.
+ *
+ * The legacy 916 table never wrote PALEVEL, so it inherited the reset default of
+ * PA0-only. That is correct for the RFM69W the original hardware used, and it is
+ * silently wrong for an RFM69HW/HCW, where PA0 is not bonded to the antenna and
+ * nothing radiates. The variant cannot be detected -- both report VERSION 0x24 --
+ * so it is a build-time choice. See Kconfig.
+ */
+static int rf69_set_pa(void)
+{
+	uint8_t pa;
+
+#if defined(CONFIG_ORANGELINK_RFM69_HW)
+	/* PA1 + PA2, PA0 off. Pout = -14 + power. */
+	pa = 0x60 | (CONFIG_ORANGELINK_RFM69_TX_POWER & 0x1F);
+#else
+	/* PA0 only. Pout = -18 + power. */
+	pa = 0x80 | (CONFIG_ORANGELINK_RFM69_TX_POWER & 0x1F);
+#endif
+
+	return rf69_write_reg(REG_PALEVEL, pa);
+}
+
 int rf69_config_916(void)
 {
 	int err;
@@ -233,6 +257,13 @@ int rf69_config_916(void)
 			return err;
 		}
 	}
+
+	err = rf69_set_pa();
+	if (err) {
+		LOG_ERR("PALEVEL write failed (%d)", err);
+		return err;
+	}
+
 	return 0;
 }
 
@@ -409,6 +440,85 @@ int rf69_dio1_irq_disable(void)
 }
 
 /* ------------------------------------------------------------------------- *
+ * Diagnostics
+ * ------------------------------------------------------------------------- */
+
+void rf69_dump_regs(void)
+{
+	static const struct { uint8_t addr; const char *name; } regs[] = {
+		{ REG_OPMODE,        "OPMODE       " },
+		{ REG_DATAMODUL,     "DATAMODUL    " },
+		{ REG_PALEVEL,       "PALEVEL      " },
+		{ REG_OCP,           "OCP          " },
+		{ REG_LNA,           "LNA          " },
+		{ REG_RXBW,          "RXBW         " },
+		{ REG_DIOMAPPING1,   "DIOMAPPING1  " },
+		{ REG_RSSITHRESH,    "RSSITHRESH   " },
+		{ REG_SYNCCONFIG,    "SYNCCONFIG   " },
+		{ REG_PACKETCONFIG1, "PACKETCONFIG1" },
+		{ REG_PAYLOADLENGTH, "PAYLOADLENGTH" },
+		{ REG_FIFOTHRESH,    "FIFOTHRESH   " },
+		{ REG_VERSION,       "VERSION      " },
+	};
+	uint8_t v;
+
+	LOG_INF("---- RFM69 register state ----");
+	for (size_t i = 0; i < ARRAY_SIZE(regs); i++) {
+		if (rf69_read_reg(regs[i].addr, &v) == 0) {
+			LOG_INF("  0x%02x %s = 0x%02x", regs[i].addr, regs[i].name, v);
+		}
+	}
+
+	/* PALEVEL is the one that decides whether anything leaves the chip.
+	 * Bit7 PA0, bit6 PA1, bit5 PA2, bits4-0 OutputPower.
+	 */
+	if (rf69_read_reg(REG_PALEVEL, &v) == 0) {
+		LOG_INF("  PA: PA0=%d PA1=%d PA2=%d power=%u",
+			(v & 0x80) ? 1 : 0, (v & 0x40) ? 1 : 0,
+			(v & 0x20) ? 1 : 0, v & 0x1F);
+		if ((v & 0x80) && !(v & 0x60)) {
+			LOG_WRN("  Only PA0 is enabled. On an RFM69HW/HCW module PA0 is");
+			LOG_WRN("  NOT bonded to the antenna -- output would be nil. That");
+			LOG_WRN("  is correct only for a plain RFM69W.");
+		}
+	}
+}
+
+int rf69_rssi_survey(int16_t *min_dbm, int16_t *max_dbm)
+{
+	int16_t lo = 0, hi = -32768;
+
+	rf69_set_mode(RF69_MODE_STANDBY);
+	rf69_set_mode(RF69_MODE_RX);
+	k_sleep(K_MSEC(5));
+
+	for (int i = 0; i < 24; i++) {
+		int16_t v = rf69_read_rssi(true);
+
+		if (i == 0) {
+			lo = hi = v;
+		}
+		if (v < lo) {
+			lo = v;
+		}
+		if (v > hi) {
+			hi = v;
+		}
+		k_sleep(K_MSEC(10));
+	}
+
+	rf69_set_mode(RF69_MODE_STANDBY);
+
+	if (min_dbm) {
+		*min_dbm = lo;
+	}
+	if (max_dbm) {
+		*max_dbm = hi;
+	}
+	return hi - lo;
+}
+
+/* ------------------------------------------------------------------------- *
  * DIO1 connectivity
  *
  * DIO1 is mapped to FifoNotEmpty, a signal we control completely: the FIFO is
@@ -578,12 +688,19 @@ int rf69_selftest_run(struct rf69_selftest *out)
 		r.mode_ready = (rf69_wait_mode_ready(20000, &r.mode_ready_us) == 0);
 	}
 
-	/* --- 5: receive chain --- */
-	r.rssi_dbm = rf69_read_rssi(true);
-	/* A real reading lands well inside the RFM69's range; 0 or the rails mean
-	 * nothing measured.
+	/* --- 5: receive chain ---
+	 *
+	 * A single sample is not enough: an earlier version accepted -127 dBm, the
+	 * rail, which a dead or antenna-less front end also returns. Enter RX and
+	 * require the reading to actually move.
 	 */
-	r.rssi_plausible = (r.rssi_dbm < 0 && r.rssi_dbm > -128);
+	{
+		int16_t lo = 0, hi = 0;
+
+		rf69_rssi_survey(&lo, &hi);
+		r.rssi_dbm = hi;
+		r.rssi_plausible = (hi < 0 && hi > -127 && (hi - lo) > 0);
+	}
 
 	/* --- 6: DIO1 wiring, deterministically --- */
 	r.dio1 = rf69_dio1_check(&r);

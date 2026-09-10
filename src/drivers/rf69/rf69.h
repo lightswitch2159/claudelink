@@ -151,6 +151,17 @@ int rf69_set_payload_len(uint8_t len);
 int rf69_set_power_level(uint8_t level);
 bool rf69_packet_sent(void);
 
+/** @brief Log the registers that decide whether we actually radiate. */
+void rf69_dump_regs(void);
+
+/**
+ * @brief Sample RSSI in RX to tell a deaf receiver from a quiet band.
+ *
+ * A receiver with no antenna reads the floor and never moves. One that is
+ * listening shows thermal variation. Returns the spread in dBm.
+ */
+int rf69_rssi_survey(int16_t *min_dbm, int16_t *max_dbm);
+
 /* --- DIO1 interrupt ---
  *
  * The legacy hardware never routed DIO0, so the driver busy-polled REG_IRQFLAGS2

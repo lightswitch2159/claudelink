@@ -8,4 +8,35 @@ config ORANGELINK_LOG_LEVEL
 	help
 	  Log level for Orangelink modules: 0=off 1=err 2=wrn 3=inf 4=dbg.
 
+choice ORANGELINK_RFM69_VARIANT
+	prompt "RFM69 module variant"
+	default ORANGELINK_RFM69_W
+	help
+	  Which power amplifier the module bonds to its antenna. This is not
+	  detectable in software -- RFM69W and RFM69HW/HCW both report
+	  REG_VERSION 0x24 -- and choosing wrong means no RF output at all.
+
+config ORANGELINK_RFM69_W
+	bool "RFM69W (PA0 bonded, up to +13 dBm)"
+	help
+	  Plain RFM69W. PA0 drives the antenna; PA1 and PA2 are not connected.
+	  This is what the legacy Orangelink hardware used.
+
+config ORANGELINK_RFM69_HW
+	bool "RFM69HW / RFM69HCW (PA1+PA2 bonded, up to +17 dBm)"
+	help
+	  High-power variant. PA0 is NOT bonded to the antenna, so leaving the
+	  register at its PA0-only reset default transmits nothing. Most 915 MHz
+	  breakout boards sold today are HCW.
+
+endchoice
+
+config ORANGELINK_RFM69_TX_POWER
+	int "RFM69 output power setting (0-31)"
+	default 31
+	range 0 31
+	help
+	  OutputPower field of RegPaLevel. On RFM69W, Pout = -18 + value dBm.
+	  On RFM69HW/HCW with PA1+PA2, Pout = -14 + value dBm.
+
 source "Kconfig.zephyr"

@@ -492,4 +492,21 @@ void subg_loopback_report(const struct subg_loopback *r)
 	LOG_INF("---- %s ----", r->all_passed ? "ALL PASSED" : "FAILURES PRESENT");
 	LOG_INF("note: loopback proves FIFO and encoding, NOT receiver sensitivity");
 	LOG_INF("      or interoperability -- those need the Minimed 722.");
+
+	rf69_dump_regs();
+
+	{
+		int16_t lo = 0, hi = 0;
+		int spread = rf69_rssi_survey(&lo, &hi);
+
+		LOG_INF("---- RSSI survey (24 samples in RX) ----");
+		LOG_INF("  min=%d dBm  max=%d dBm  spread=%d dB", lo, hi, spread);
+		if (spread == 0) {
+			LOG_WRN("  RSSI never moved. A receiver with an antenna shows some");
+			LOG_WRN("  thermal variation; a flat reading suggests no antenna is");
+			LOG_WRN("  fitted, or the front end is not running.");
+		} else {
+			LOG_INF("  RSSI varies, so the receive front end is live.");
+		}
+	}
 }
