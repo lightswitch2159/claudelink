@@ -1,0 +1,239 @@
+/*
+ * PROPOSED devicetree overlay for Orangelink on XIAO nRF52840.
+ *
+ * ============================ READ THIS FIRST ============================
+ * STATUS: PROPOSAL ONLY. NEVER BUILT. Deliberately named ".proposed" so the
+ * build system does not pick it up.
+ *
+ * Its purpose is to make the pin budget in docs/DECISION-xiao-nrf52840.md
+ * concretely checkable, not to be compiled. Before use:
+ *
+ *   1. Confirm the xiao_ble board exists in NCS v3.4.0's Zephyr tree.
+ *   2. Read the real boards/seeed/xiao_ble/xiao_ble.dts and FIX EVERY NODE
+ *      LABEL BELOW. The labels here (&spi2, &pwm0, &adc, &pinctrl group names)
+ *      are conventional guesses, NOT verified against the board definition.
+ *      Some will be wrong.
+ *   3. Confirm the onboard RGB LED and VBAT nodes the board already defines --
+ *      do not redeclare what the board provides.
+ *   4. Rename to xiao_ble.overlay once it builds.
+ *
+ * Pin budget: 9 of 11 header pins used, 2 spare (D6/D7).
+ * Two RFM69 radios -- 433 MHz (Omnipod) and 916/868 MHz (Minimed).
+ * =========================================================================
+ */
+
+/ {
+	aliases {
+		/*
+		 * Legacy LED_0 / LED_1 were two discrete active-low GPIO. The XIAO
+		 * has ONE common-anode RGB LED (R=P0.26, G=P0.30, B=P0.06), also
+		 * active low. "Yellow" in the legacy indication patterns was red+green
+		 * driven together; the RGB device produces it directly.
+		 *
+		 * periph/led/led.c must be reworked from a two-pin model to a colour
+		 * model. This is user-visible behaviour -- see MIGRATION_NOTES.md.
+		 * The board dts already defines led0/led1/led2 for these; prefer those
+		 * over redeclaring the GPIO here.
+		 */
+		orangelink-led-red = &led0;    /* VERIFY which board alias is which */
+		orangelink-led-green = &led1;
+		orangelink-led-blue = &led2;
+	};
+
+	orangelink {
+		compatible = "gpio-keys";  /* placeholder container; not a real binding */
+
+		/*
+		 * RFM69 DIO0 interrupt lines. THESE ARE NEW -- the legacy board never
+		 * routed them, which is why the driver busy-polls REG_IRQFLAGS2 over
+		 * SPI and why Subg_GetPkt() blocks for seconds at a time.
+		 * See docs/aps-protocol-spec.md 6.2 and DECISION-xiao-nrf52840.md 1.1.
+		 */
+		rf69_0_dio0: rf69_0_dio0 {
+			gpios = <&gpio0 28 (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>;  /* D2 */
+			label = "RFM69 433MHz DIO0";
+		};
+		rf69_1_dio0: rf69_1_dio0 {
+			gpios = <&gpio0 29 (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>;  /* D3 */
+			label = "RFM69 916/868MHz DIO0";
+		};
+	};
+};
+
+/*
+ * SPI bus shared by both RFM69 radios.
+ *
+ * D8/D9/D10 (P1.13/P1.14/P1.15) are the XIAO's default SPI pins, so this is a
+ * natural mapping.
+ *
+ * NOTE ON CHIP SELECT: the legacy driver drives NSS manually via GPIO rather
+ * than using the SPI peripheral's CS, and also de-inits the bus between
+ * operations. Declaring cs-gpios here lets Zephyr manage CS properly, which is
+ * the better design -- but it IS a behavioural change to the driver. Validate
+ * RFM69 timing with a logic analyser before trusting it. If the radios prove
+ * fussy about CS timing, fall back to manual GPIO control and drop cs-gpios.
+ */
+&spi2 {                                  /* VERIFY node label */
+	status = "okay";
+	pinctrl-0 = <&spi2_default>;
+	pinctrl-1 = <&spi2_sleep>;
+	pinctrl-names = "default", "sleep";
+
+	cs-gpios = <&gpio0 2 GPIO_ACTIVE_LOW>,   /* D0 -> RFM69 #1 (433)     NSS */
+	           <&gpio0 3 GPIO_ACTIVE_LOW>;   /* D1 -> RFM69 #2 (916/868) NSS */
+
+	/*
+	 * No upstream Zephyr driver exists for the RFM69; periph/rf69/ is ported
+	 * as an application-level driver (Phase 3, brief task 16). These child
+	 * nodes exist so each radio gets its own spi_dt_spec.
+	 */
+	rf69_0: rf69@0 {
+		compatible = "vnd,spi-device";    /* replace with a real binding */
+		reg = <0>;
+		spi-max-frequency = <4000000>;    /* VERIFY against RFM69 datasheet */
+		label = "RFM69_433";
+	};
+
+	rf69_1: rf69@1 {
+		compatible = "vnd,spi-device";
+		reg = <1>;
+		spi-max-frequency = <4000000>;
+		label = "RFM69_916N868";
+	};
+};
+
+/* Motor: D4 = P0.04.
+ *
+ * WARNING: XIAO GPIO are limited to 15 mA and cannot drive a vibration motor
+ * directly -- this MUST go through a MOSFET or driver IC on the carrier board.
+ * See DECISION-xiao-nrf52840.md 3.2. Legacy duty cycle was 50%.
+ */
+&pwm0 {                                  /* VERIFY node label */
+	status = "okay";
+	pinctrl-0 = <&pwm0_default>;
+	pinctrl-1 = <&pwm0_sleep>;
+	pinctrl-names = "default", "sleep";
+};
+
+/* Buzzer: D5 = P0.05. Legacy XH_5102 only: 50% duty, PWM top = 366. */
+&pwm1 {                                  /* VERIFY node label */
+	status = "okay";
+	pinctrl-0 = <&pwm1_default>;
+	pinctrl-1 = <&pwm1_sleep>;
+	pinctrl-names = "default", "sleep";
+};
+
+/*
+ * Battery voltage.
+ *
+ * Legacy used P0.04 / SAADC AIN2 with an external divider. The XIAO reads VBAT
+ * on P0.31 (AIN7) through its own onboard divider, gated by P0.14.
+ *
+ * !!! HAZARD !!!  P0.14 (READ_BAT_ENABLE) is ACTIVE LOW. Seeed documents that
+ * when P0.14 is HIGH the sense path is disabled and P0.31 may reach 3.6 V,
+ * risking damage to the pin. The ported app_battery.c MUST drive P0.14 LOW
+ * before reading P0.31 and may restore it afterwards. This is a hard
+ * requirement, not a nice-to-have.
+ *
+ * The divider ratio differs from the legacy board, so the voltage conversion in
+ * app_battery.c must be recalculated -- do not carry the old scaling over.
+ * Check whether the board dts already provides a vbatt/voltage-divider node
+ * before declaring a raw channel here.
+ */
+&adc {
+	status = "okay";
+
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	channel@7 {
+		reg = <7>;
+		zephyr,gain = "ADC_GAIN_1_5";          /* VERIFY against divider ratio */
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,input-positive = <NRF_SAADC_AIN7>;   /* P0.31 */
+		zephyr,resolution = <12>;
+	};
+};
+
+/*
+ * Pin control.
+ *
+ * The group names below follow Zephyr convention but MUST be checked against
+ * xiao_ble-pinctrl.dtsi -- the board already defines groups for its default
+ * SPI/UART/I2C assignments and redefining them here will conflict.
+ */
+&pinctrl {
+	spi2_default: spi2_default {
+		group1 {
+			psels = <NRF_PSEL(SPIM_SCK,  1, 13)>,   /* D8  */
+			        <NRF_PSEL(SPIM_MOSI, 1, 15)>,   /* D10 */
+			        <NRF_PSEL(SPIM_MISO, 1, 14)>;   /* D9  */
+		};
+	};
+
+	spi2_sleep: spi2_sleep {
+		group1 {
+			psels = <NRF_PSEL(SPIM_SCK,  1, 13)>,
+			        <NRF_PSEL(SPIM_MOSI, 1, 15)>,
+			        <NRF_PSEL(SPIM_MISO, 1, 14)>;
+			low-power-enable;
+		};
+	};
+
+	pwm0_default: pwm0_default {
+		group1 {
+			psels = <NRF_PSEL(PWM_OUT0, 0, 4)>;     /* D4 motor */
+		};
+	};
+
+	pwm0_sleep: pwm0_sleep {
+		group1 {
+			psels = <NRF_PSEL(PWM_OUT0, 0, 4)>;
+			low-power-enable;
+		};
+	};
+
+	pwm1_default: pwm1_default {
+		group1 {
+			psels = <NRF_PSEL(PWM_OUT0, 0, 5)>;     /* D5 buzzer */
+		};
+	};
+
+	pwm1_sleep: pwm1_sleep {
+		group1 {
+			psels = <NRF_PSEL(PWM_OUT0, 0, 5)>;
+			low-power-enable;
+		};
+	};
+};
+
+/*
+ * ---------------------------------------------------------------------------
+ * PIN ALLOCATION SUMMARY
+ * ---------------------------------------------------------------------------
+ * Header pins (11 available, 9 used):
+ *   D0  P0.02   RFM69 #1 (433)      NSS
+ *   D1  P0.03   RFM69 #2 (916/868)  NSS
+ *   D2  P0.28   RFM69 #1  DIO0 IRQ      <- new vs legacy
+ *   D3  P0.29   RFM69 #2  DIO0 IRQ      <- new vs legacy
+ *   D4  P0.04   PWM motor  (needs external driver)
+ *   D5  P0.05   PWM buzzer
+ *   D6  P1.11   SPARE  -- suggest RFM69 #1 RESET
+ *   D7  P1.12   SPARE  -- suggest RFM69 #2 RESET
+ *   D8  P1.13   SPI SCLK
+ *   D9  P1.14   SPI MISO
+ *   D10 P1.15   SPI MOSI
+ *
+ * Onboard, no header pins consumed:
+ *   P0.26 / P0.30 / P0.06   RGB LED (common anode, active low)
+ *   P0.31 (AIN7)            VBAT sense
+ *   P0.14                   VBAT read-enable, ACTIVE LOW -- see hazard above
+ *
+ * Debug console: USB CDC or RTT over SWD -- costs no header pins.
+ *
+ * NOT ADDRESSED HERE (Phase 5): flash partitions, MCUboot, and removing the
+ * Adafruit UF2 bootloader, which accepts unsigned firmware. See
+ * docs/DECISION-xiao-nrf52840.md 3.3.
+ * ---------------------------------------------------------------------------
+ */
