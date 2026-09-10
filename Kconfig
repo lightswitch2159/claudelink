@@ -39,4 +39,15 @@ config ORANGELINK_RFM69_TX_POWER
 	  OutputPower field of RegPaLevel. On RFM69W, Pout = -18 + value dBm.
 	  On RFM69HW/HCW with PA1+PA2, Pout = -14 + value dBm.
 
+config ORANGELINK_TX_LEGACY_TRUNCATE
+	bool "Transmit like the legacy firmware (fixed 255-byte frame, truncated)"
+	default n
+	help
+	  The legacy firmware left RegPayloadLength at 0xFF for transmit, so with
+	  PACKET1_FORMAT_FIXED every frame ran the full 255 bytes and was truncated
+	  mid-packet by forcing STANDBY once the FIFO drained. Setting the real
+	  payload length instead is cleaner and 10x faster, but the pump has only
+	  ever seen the truncated behaviour. Enable this to reproduce it exactly
+	  when diagnosing interoperability.
+
 source "Kconfig.zephyr"

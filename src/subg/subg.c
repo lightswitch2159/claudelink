@@ -113,7 +113,13 @@ static int minimed_tx(const uint8_t *data, uint8_t len)
 	 * the truncated-255 behaviour. If it turns out to depend on that tail,
 	 * revert to draining-plus-STANDBY instead.
 	 */
+#if defined(CONFIG_ORANGELINK_TX_LEGACY_TRUNCATE)
+	/* Leave PayloadLength at 0xFF and truncate by forcing STANDBY once the FIFO
+	 * has drained, exactly as the legacy firmware did.
+	 */
+#else
 	rf69_set_payload_len(len + 1);
+#endif
 
 	/* Prime the FIFO, then stream the remainder as it drains. */
 	sent = MIN(len, RF69_FIFO_SIZE);
@@ -146,6 +152,17 @@ static int minimed_tx(const uint8_t *data, uint8_t len)
 	 * module if TX latency ever matters -- but TX is short and bounded, so
 	 * polling costs little.
 	 */
+#if defined(CONFIG_ORANGELINK_TX_LEGACY_TRUNCATE)
+	/* Legacy: wait for the FIFO to drain, then cut the transmission short. */
+	for (int i = 0; i < SUBG_TX_DONE_WAIT_MS; i++) {
+		if (rf69_fifo_is_empty()) {
+			break;
+		}
+		k_sleep(K_MSEC(1));
+	}
+	rf69_set_mode(RF69_MODE_STANDBY);
+	return 0;
+#else
 	for (int i = 0; i < SUBG_TX_DONE_WAIT_MS; i++) {
 		if (rf69_packet_sent()) {
 			return 0;
@@ -155,6 +172,7 @@ static int minimed_tx(const uint8_t *data, uint8_t len)
 
 	LOG_WRN("PacketSent did not assert within %u ms", SUBG_TX_DONE_WAIT_MS);
 	return -ETIMEDOUT;
+#endif
 }
 
 int subg_send_pkt(const uint8_t *data, uint8_t len, uint8_t repeat_cnt,

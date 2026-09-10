@@ -739,3 +739,72 @@ packed struct and byte-swapping in place -- see section 2.5.
 The loopback proves the FIFO, the encode/decode chain and the DIO1 interrupt. It
 does **not** prove receiver sensitivity or interoperability -- both need the
 Minimed 722.
+
+---
+
+## 10. First Minimed 722 interop attempt: what is eliminated, what is not
+
+Pump: 722, serial REDACTED, bench unit with no insulin, not worn. Read-only opcodes
+only (wakeup 0x5D, model read 0x8D). No reply yet. Recording the eliminations so
+the next session does not repeat them.
+
+### One real bug found: RegPaLevel on a high-power module
+
+The register dump showed `PALEVEL = 0x9f` -- PA0 on, PA1/PA2 off, power 31. That is
+the RFM69 reset default, and the legacy 916 table **never writes PALEVEL**, so it
+was simply inherited. It is correct only for a plain RFM69W, where PA0 is bonded to
+the antenna.
+
+The fitted module is an **RFM69HC**, where PA0 is *not* bonded -- PA1+PA2 are. So
+the firmware was radiating nothing at all. `rf69_config_916()` now writes PALEVEL
+explicitly from a Kconfig choice, because the variant is **not detectable in
+software**: RFM69W and RFM69HW/HCW both report `REG_VERSION 0x24`.
+
+Power is set to 27, giving +13 dBm on PA1+PA2 -- deliberately matching the +13 dBm
+the legacy RFM69W produced at PA0 power=31, rather than the +17 dBm maximum. Same
+level the pump has always seen, and it avoids desensing the pump's receiver at
+bench range.
+
+Fixing this did **not** produce a reply, so it was necessary but not sufficient.
+
+### Eliminated by measurement
+
+| Hypothesis | How it was ruled out |
+|---|---|
+| Frequency wrong | Swept 916.30-916.80 MHz in 50 kHz steps, silent at every point |
+| Receive chain dead | RSSI survey in RX reads -90 to -87 dBm and **varies** -- a live front end on a connected antenna |
+| SPI / FIFO / registers | Self-test and loopback all pass; register dump reads back correctly |
+| DIO1 not wired | Deterministic FifoNotEmpty test passes; the interrupt fires |
+| Payload-length change broke it | **Tested both ways.** `CONFIG_ORANGELINK_TX_LEGACY_TRUNCATE=y` reproduces the legacy fixed-255 truncated transmit exactly, and the pump is silent under both. This was the top predicted suspect and it is now cleared. |
+| Host tooling wrong | CRC8 checked against decocare's table and test vector; 4b6b cross-checked byte-for-byte against the firmware's own C implementation; frequency register math round-trips exactly |
+
+### Not yet eliminated, in order of probability
+
+1. **The Medtronic protocol implementation in `tools/minimed.py` is wrong
+   somewhere.** This is host-side guesswork, not firmware. Specifically unverified:
+   whether the wakeup is really a bare `A7 <sn> 5D <crc>` frame (decocare's
+   PowerControl 0x5D carries parameters, so a bare one may simply be rejected);
+   whether 4b6b covers the CRC byte; and whether the pump needs a different
+   preamble length or sync word than the legacy table configures.
+2. **Nothing is actually leaving the antenna**, despite correct PA registers.
+   Cannot be confirmed with a single transceiver -- needs an SDR or a second
+   receiver.
+3. **The pump is not in a receptive state.**
+
+### The measurement that would cut through this
+
+Everything above is inference. Two things would settle it directly:
+
+- **Passive capture of pump RF** (`tools/sniff_722.py`, transmits nothing). If it
+  captures even one frame, the receive chain is proven end to end against real RF
+  and the problem is isolated to transmit. Needs the pump to use its radio.
+- **AndroidAPS or Loop.** Our GATT service is byte-identical to the original
+  (41/41 verified), so a real app should discover the device as an
+  Orangelink/RileyLink and drive it with a correct, battle-tested Medtronic
+  implementation -- removing the host-side guesswork entirely. This is the
+  strongest available interop test.
+
+**Honest status: the firmware's radio stack is verified as far as bench
+instrumentation allows. Interoperability with the pump is unproven, and the
+remaining uncertainty sits mostly in the host-side protocol implementation rather
+than in the ported firmware.**
