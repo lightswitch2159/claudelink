@@ -4,35 +4,66 @@ Paste the block below into Flux. Everything in it is derived from the firmware a
 built: pin assignments come from `boards/xiao_ble.overlay`, the charge-current and
 battery-sense behaviour from `src/battery/battery.c`.
 
-## Read this first: the charger conflict
+## Read this first: the carrier owns the power path
 
-**The XIAO nRF52840 already has a USB-C connector and a BQ25101 charger on it.**
-Adding a second charger to the same cell is the main hazard in this design: two
-chargers driving one LiPo is not a configuration either one is designed for.
+The cell connects to the **carrier only**. The XIAO's `B+`/`B-` pads are left
+unconnected and its USB-C is unused, so its onboard BQ25101 charger never has
+either a supply or a battery and stays out of the design entirely. That removes the
+two-chargers-on-one-cell hazard by construction rather than by a usage rule.
 
-The resolution below avoids it without any firmware change, and the reasoning
-matters enough that it is stated as a hard constraint in the prompt:
+The consequence is that **both of the XIAO's battery facilities stop working**, and
+the carrier has to replace one of them:
 
-* The cell connects to the carrier's protection + charger **and** to the XIAO's
-  `B+`/`B-` pads on the same net.
-* The XIAO's BQ25101 only charges when *its own* VBUS is powered. With the XIAO's
-  USB-C left unused, it is inert, and the carrier's charger has the cell to itself.
-* Because the cell is still on `B+`, the XIAO's onboard divider on P0.31 keeps
-  working, so `battery.c` needs no changes at all.
+* P0.31 / AIN7 reads the cell through the module's own divider off `B+`. With `B+`
+  unconnected it reads nothing, so **the carrier must provide its own divider** to
+  a free analog pin.
+* P0.13 selects 50/100 mA on the module's charger. Irrelevant once that charger is
+  unused; charge current is set by a resistor on the carrier instead.
 
-**The one rule this creates: never plug into both USB-C ports at once.** Worth
-physically blocking the XIAO's connector in any enclosure.
+Power architecture this implies:
 
-Why bother with a second charger at all: the XIAO's charger tops out at 100 mA, and
-the cell is 1800 mAh. That is roughly **23 hours** from empty. At 900 mA (0.5C) it
-is about three. That is the whole motivation, and it is stated in the prompt so the
-tool does not "helpfully" spec a 100 mA part.
+```
+USB-C ──► charger (power path) ──► SYS ──┬──► LDO 3V3 ──► XIAO 3V3 pin + RFM69HCW
+                │                        └──► motor MOSFET
+                └──► BAT ──► 1S protection ──► cell ──► divider ──► XIAO AIN1
+```
 
-Note also that `CONFIG_ORANGELINK_BATTERY_FAST_CHARGE` (P0.13) selects current on
-the XIAO's *inert* charger once this board exists. Harmless, and left in place.
+Two choices in there worth knowing about, both argued in the prompt:
+
+1. **The XIAO is fed on its `3V3` pin, not its `5V` pin.** Feeding `5V` would
+   energise the module's VBUS and wake its charger with no battery attached.
+   Feeding `3V3` back-drives the module's LDO output, which is accepted practice
+   for these modules provided USB is never connected at the same time.
+2. **An LDO rather than a buck-boost.** A LiPo spans 4.2 V down to about 3.0 V and
+   the RFM69HCW is only rated to 3.6 V, so regulation is required -- running
+   straight off the cell is not an option. An LDO loses regulation near 3.5 V and
+   so gives up roughly the last 10% of the cell, but it is quiet next to a 916 MHz
+   receiver and far simpler. With idle current now in the tens of microamps and an
+   1800 mAh cell, runtime is nowhere near the binding constraint, so the RF
+   cleanliness is worth more than the capacity. Buck-boost is offered as the
+   alternative if that judgement changes.
+
+Why a charger on the carrier at all: the module's is capped at 100 mA, which is
+about **23 hours** for an 1800 mAh cell against roughly **three** at 900 mA (0.5C).
+That is stated in the prompt so the tool does not spec a small part.
 
 Terminology: for a single cell, "BMS" means a protection IC (over-charge,
 over-discharge, over-current, short-circuit). Cell balancing does not apply.
+
+## Firmware changes this requires
+
+The board below does not work with the firmware as it stands. Tracked here so the
+two stay in step:
+
+* `boards/xiao_ble.overlay` -- point `zephyr,user` `io-channels` at `&adc 1`
+  (AIN1 = P0.03 = D1) instead of `&adc 7`; delete the `vbat_enable` and
+  `chg_current` nodes.
+* `src/battery/battery.c` -- drop `vbatt_enable` and `chg_current` entirely.
+* `Kconfig` -- `ORANGELINK_BATTERY_OUTPUT_OHMS` / `_FULL_OHMS` become the carrier's
+  divider values, and the calibration must be redone against a meter. Remove
+  `ORANGELINK_BATTERY_FAST_CHARGE`.
+* Optionally consume the charger `STAT` output as a GPIO input so the status LED
+  can distinguish charging from discharging.
 
 ---
 
@@ -65,12 +96,42 @@ over-discharge, over-current, short-circuit). Cell balancing does not apply.
 > * Expose charger `STAT`/`CHG` and `PGOOD` outputs on test pads or a header.
 > * A JST-PH 2.0 mm connector for the cell, polarity marked in silkscreen.
 >
-> **Hard constraint — do not create a second charge path.** The XIAO module has
-> its own USB-C and BQ25101 charger wired to the same `B+` net. Do not connect the
-> carrier's VBUS, 5 V rail, or charger output to the module's `5V` pin, and do not
-> add any path that could energise the module's VBUS from this board. The module's
-> charger must remain unpowered and inert so only the carrier charger drives the
-> cell. Note this restriction in the silkscreen and in the design notes.
+> * **System rail and regulation.** Take the charger's power-path output as a
+>   `SYS` rail, and regulate it to 3.3 V with a low-dropout LDO sized for at least
+>   250 mA continuous. This rail supplies the XIAO and the RFM69HCW. Prefer an LDO
+>   over a switching regulator here: the RFM69HCW is a 916 MHz receiver and
+>   switching noise is the greater risk, while runtime is not a constraint with an
+>   1800 mAh cell. If you believe a buck-boost is justified to recover the bottom
+>   of the cell's range, say so and explain the trade-off rather than silently
+>   substituting one.
+> * **Feed the XIAO on its `3V3` pin**, not its `5V` pin. Do not connect the
+>   carrier's VBUS, `SYS` rail or charger output to the module's `5V` pin, and do
+>   not add any path that could energise the module's VBUS from this board.
+> * **Leave the module's `B+` and `B-` pads unconnected.** The cell belongs to the
+>   carrier alone. The module's onboard charger must never see a supply or a
+>   battery.
+> * Note both restrictions in the silkscreen and in the design notes.
+>
+> ### Battery sense — the carrier must provide this
+> With the cell off the module, the module's own battery divider is dead and the
+> firmware needs a replacement analog input:
+>
+> * Resistive divider from the **cell** (battery side of the protection IC, so it
+>   reads the cell rather than the charger output) to **D1 / P0.03 / AIN1**.
+> * Use **1 Mohm / 1 Mohm**, giving 2.1 V at a full 4.2 V cell. The firmware will
+>   sample it at ADC gain 1/4 against the 0.6 V internal reference, a 2.4 V full
+>   scale, so that ratio uses most of the range with headroom to spare. High values
+>   deliberately: the standing drain is about 2 uA, against a board idle budget
+>   measured in tens of microamps. Do not use 100k/100k -- 21 uA would be a
+>   significant fraction of total idle current.
+> * Place a **100 nF capacitor from the divider tap to ground.** The nRF52840 SAADC
+>   is a switched-capacitor input and cannot settle from a 500 kohm source without
+>   it.
+> * D1/P0.03 is chosen because it is one of only two free pins that are analog
+>   capable: of D1 (P0.03 = AIN1), D3 (P0.29 = AIN5), D6 (P1.11) and D7 (P1.12),
+>   the P1 pins have no ADC. Do not reassign this to a P1 pin.
+> * Bring the charger's `STAT` output to **D3 / P0.29** as a GPIO input so firmware
+>   can tell charging from discharging.
 >
 > ### Sub-GHz radio
 > RFM69HCW module (SMD, 915/916 MHz band), connected to the XIAO as follows.
@@ -121,8 +182,9 @@ the stackup, dielectric and the calculated trace width in the design notes.
 >   and a gate pull-down, plus a 2-pin connector.
 > * **Buzzer** on D5 (P0.05): magnetic buzzer with a driver transistor, or a
 >   piezo driven directly if that keeps it simpler.
-> * Leave D1 (P0.03), D3 (P0.29), D6 (P1.11) and D7 (P1.12) unassigned, brought
->   out to a 0.1 inch expansion header with 3V3 and GND.
+> * D1 (P0.03) and D3 (P0.29) are now taken by battery sense and charger status
+>   above. Leave D6 (P1.11) and D7 (P1.12) unassigned, brought out to a 0.1 inch
+>   expansion header with 3V3 and GND.
 > * Bring SWDIO, SWCLK, RESET, 3V3 and GND to a standard debug header. The module
 >   only exposes these as tiny underside test pads, which are painful to solder
 >   by hand and have already cost this project a bricked board.
@@ -148,14 +210,18 @@ Automated tools get these wrong often enough to be worth a checklist:
 
 1. **CC pull-downs present on both CC1 and CC2.** Without them a USB-C source
    supplies nothing and the board simply will not charge.
-2. **No path from carrier VBUS to the module's `5V` pin.** This is the whole
-   point of the constraint above; verify it in the netlist, not the prose.
-3. **Protection IC on the cell side of the charger**, not between charger and load.
-4. **Charge current resistor** actually computes to ~900 mA for the chosen part --
+2. **No path from carrier VBUS or SYS to the module's `5V` pin, and `B+`/`B-`
+   genuinely unconnected.** Verify both in the netlist, not the prose -- this is
+   what keeps the module's charger out of the design.
+3. **Battery divider taps the cell, not the charger output**, lands on D1/P0.03,
+   and has its 100 nF to ground. A divider on the wrong side of the protection IC
+   reads the charger during charging and looks plausible while being wrong.
+4. **Protection IC on the cell side of the charger**, not between charger and load.
+5. **Charge current resistor** actually computes to ~900 mA for the chosen part --
    check it against that part's datasheet formula rather than trusting the value.
-5. **Antenna trace**: impedance actually calculated for the stated stackup rather
+6. **Antenna trace**: impedance actually calculated for the stated stackup rather
    than asserted, continuous ground directly under the whole run, no stub branch
    to an unpopulated SMA, u.FL keep-out respected on every layer, and the RF
    section not routed under or beside the switcher.
-6. **Flyback diode across the motor**, and the MOSFET gate pulled down so the
+7. **Flyback diode across the motor**, and the MOSFET gate pulled down so the
    motor cannot twitch during reset.
