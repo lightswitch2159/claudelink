@@ -1,0 +1,53 @@
+/*
+ * BODGE -- NOT THE DESIGN. Board-specific workaround for one damaged unit.
+ * SPDX-License-Identifier: GPL-2.0-only
+ *
+ * Moves SPI MISO from D9 (P1.14) to D7 (P1.12).
+ *
+ * The documented pinout is D9 and boards/xiao_ble.overlay still says so. This
+ * file exists because the D9 castellation on one bench unit will not carry a
+ * signal, and it is applied only by adding it to EXTRA_DTC_OVERLAY_FILE.
+ *
+ * WHY IT WAS NEEDED, so nobody repeats the diagnosis:
+ *
+ *   - Three RFM69 modules in a row read REG_VERSION=0xFF, including a 433 MHz
+ *     unit borrowed purely to test the SPI link. All three were fine.
+ *   - Over SWD, P1.14 drove high and low correctly *at the die*, the module was
+ *     powered (3.3 V measured at its own rail), there was no bridge to
+ *     MOSI/SCK/NSS, and MISO still floated with NSS asserted -- which a powered,
+ *     selected SX1231 cannot do.
+ *   - Driving D9 high measured 0.8 V, then later 1.7 V, at the module end. A
+ *     *wandering* mid-rail value is a resistive path, not a clean break.
+ *   - D7's castellation measured a clean 3.3 V under identical conditions. That
+ *     A/B is what isolated it: the die was never the problem, and a pin test
+ *     cannot reach the castellation or its solder joint.
+ *
+ * With MISO on D7 the self-test passes (VERSION=0x24) and the pump answers 5/5
+ * model reads at -40 dBm, reporting model '722'.
+ *
+ * Note this only became possible because removing the UART freed D6/D7.
+ *
+ * TO RETIRE THIS: repair or re-solder the D9 joint, build without this overlay,
+ * and confirm the self-test still passes. Do not fold it into the main overlay.
+ *
+ *   west build -b xiao_ble --sysbuild . -- \
+ *     -DEXTRA_DTC_OVERLAY_FILE="dts/orangelink-partitions.dtsi;\
+ *  dts/orangelink-app-slot0.overlay;boards/bodge-miso-d7.overlay" ...
+ */
+
+&spi2_default {
+	group1 {
+		psels = <NRF_PSEL(SPIM_SCK, 1, 13)>,
+			<NRF_PSEL(SPIM_MOSI, 1, 15)>,
+			<NRF_PSEL(SPIM_MISO, 1, 12)>;   /* D7 -- bodge, design is D9/P1.14 */
+	};
+};
+
+&spi2_sleep {
+	group1 {
+		psels = <NRF_PSEL(SPIM_SCK, 1, 13)>,
+			<NRF_PSEL(SPIM_MOSI, 1, 15)>,
+			<NRF_PSEL(SPIM_MISO, 1, 12)>;
+		low-power-enable;
+	};
+};

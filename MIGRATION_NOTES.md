@@ -1712,3 +1712,78 @@ Flash and RAM both fell, which is a useful cross-check that the driver really we
 
 The power saving itself is still unmeasured -- see the note in 17.3 about needing a
 current meter rather than more datasheet arithmetic.
+
+## 18. A dead castellation, and three modules replaced for nothing
+
+The RFM69 stopped answering: `REG_VERSION=0xFF` on every 5-second retry. Three
+modules were swapped chasing it -- two 916 MHz and a 433 MHz unit borrowed purely
+to test the SPI link, since all RFM69 variants share the SX1231 die and report
+`0x24` regardless of band. **All three were fine.** The fault was the XIAO's D9
+castellation, or its solder joint.
+
+### 18.1 What the debugger could and could not prove
+
+Everything here was measured over SWD with the core halted, which turned out to be
+a good way to test a board with no working radio:
+
+| Test | Result | What it ruled out |
+|---|---|---|
+| Drive each SPI pin high/low, read back | all follow | nRF pins healthy *at the die* |
+| Pull-up / pull-down on MISO | follows both | nothing external driving it |
+| Drive MOSI/SCK/NSS, watch MISO | no coupling | no solder bridges |
+| NSS asserted low, MISO pull test | still floating | a powered, selected SX1231 **must** drive MISO -- it wasn't |
+| Module rail, by meter | 3.3 V | module is powered |
+
+**A pin test cannot reach the castellation or its solder joint.** That is the one
+link in the chain the debugger cannot see, and it is where the fault was.
+
+One false start worth recording: the first pin-integrity run reported three pins
+"damaged". It was wrong -- `SPIM2` owned P1.13/14/15 through PSEL, so GPIO writes
+had no effect, which is exactly why NSS (a plain `cs-gpios` pin) was the only one
+that appeared to work. Writing 0 to the SPIM `ENABLE` register at `0x40023500`
+releases the pins and the test then gives real answers.
+
+### 18.2 The measurement that actually found it
+
+Using the debugger as a signal source: halt the core, release the pins from SPIM,
+and latch one pin high while holding the rest low. Then probe with a meter.
+
+Driving D9 high measured **0.8 V, and later 1.7 V**, at the module end. A
+*wandering* mid-rail value is the signature of a resistive path -- not a clean
+connection (3.3 V) and not a clean break (0 V, or floating). Driving D9 low
+reached 0 V cleanly, so the asymmetry pointed at a poor joint rather than a short.
+
+The decisive step was checking the destination **before** committing to it: D7's
+castellation measured a clean 3.3 V under identical conditions. Same driver, same
+conditions, different pad -- which isolates the pad and its joint from everything
+else.
+
+### 18.3 The fix is a bodge, and is kept as one
+
+MISO moved to D7 (P1.12), which was only free because removing the UART earlier
+released D6/D7. With it, the self-test passes (`VERSION = 0x24`, `ALL PASSED`) and
+the pump answers **5/5 model reads at -40 dBm reporting model '722'** -- the
+strongest link yet measured, against -50..-54 dBm previously.
+
+**This is not the design.** `boards/xiao_ble.overlay` still specifies D9, and the
+default build produces `SPIM_MISO -> P1.14`. The workaround lives in
+`boards/bodge-miso-d7.overlay` and applies only when explicitly added to
+`EXTRA_DTC_OVERLAY_FILE`. Both were verified by decoding `spi2_default` out of the
+generated `zephyr.dts` for each build.
+
+To retire it: repair the D9 joint, build without the overlay, confirm the
+self-test passes.
+
+Caveat on the diagnosis: moving to D7 changed the pin, the wire *and* the joint at
+once, so it does not strictly prove the castellation itself was bad rather than
+that end of the old wire. If D9 is ever needed, re-solder it fresh and retest
+rather than assuming the pad is dead.
+
+### 18.4 Lesson
+
+Three modules were replaced before anything was measured. The sequence that
+actually worked was: prove the die is fine, prove the module is powered, prove
+there is no bridge, then use the debugger as a signal generator and a meter as the
+receiver to find where a known-good signal stops arriving. **The instrument to
+reach for on "the peripheral does not answer" is a voltmeter and a latched pin,
+not another part.**
