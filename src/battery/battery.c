@@ -8,6 +8,9 @@
 #include <zephyr/drivers/adc.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/logging/log.h>
+#if defined(CONFIG_BT_BAS)
+#include <zephyr/bluetooth/services/bas.h>
+#endif
 
 #include "battery.h"
 #include "indication/led.h"
@@ -217,6 +220,26 @@ static void battery_work_fn(struct k_work *work)
 	percent = mv_to_percent(mv);
 	last_mv = mv;
 	last_percent = percent;
+
+	/*
+	 * Publish to the BLE Battery Service.
+	 *
+	 * CONFIG_BT_BAS was already enabled but nothing ever set a level, and
+	 * Zephyr's BAS initialises its characteristic to 100 -- so every client,
+	 * AndroidAPS included, read a permanent "100%" that had nothing to do with
+	 * the cell. Legacy pushed this from a timer via
+	 * ble_bas_battery_level_update(); the equivalent here is every sample.
+	 */
+#if defined(CONFIG_BT_BAS)
+	{
+		int bas_err = bt_bas_set_battery_level(percent);
+
+		if (bas_err) {
+			LOG_WRN("bt_bas_set_battery_level(%u) failed (%d)", percent,
+				bas_err);
+		}
+	}
+#endif
 
 	want = colour_for(percent, shown);
 	if (want != shown) {

@@ -83,16 +83,26 @@ config ORANGELINK_BATTERY_OUTPUT_OHMS
 	  Lower leg of the XIAO's onboard battery divider, P0.31 to ground.
 
 config ORANGELINK_BATTERY_FULL_OHMS
-	int "Divider total resistance (ohms)"
-	default 1510000
+	int "Divider total resistance (ohms), calibrated"
+	default 1531215
 	help
-	  Both legs in series. Cell voltage is the measured pin voltage scaled by
-	  FULL_OHMS / OUTPUT_OHMS.
+	  Cell voltage is the measured pin voltage scaled by FULL_OHMS /
+	  OUTPUT_OHMS.
 
-	  UNCALIBRATED. The defaults are the commonly cited 1M / 510k for this
-	  board, giving a ratio of about 2.96, but this has not been verified
-	  against the hardware in hand. Measure the cell with a meter, compare it
-	  against the millivolts the battery module logs, and correct FULL_OHMS.
+	  This is a CALIBRATION HANDLE, not strictly a resistance: it absorbs
+	  resistor tolerance and ADC gain/offset error as well as the nominal
+	  divider ratio, so the calibrated value is expected to deviate from the
+	  nominal part values.
+
+	  CALIBRATED on the bench unit: pin read 1259 mV where a meter measured
+	  3.78 V across the cell, giving a ratio of 3.0024 against the nominal
+	  2.9608 for 1M / 510k -- 1.4% high, consistent with 1% resistors plus ADC
+	  error. That 1.4% mattered: it moved the reading from 19% (red) to 32%
+	  (yellow).
+
+	  Recalibrate per board. The module logs raw count, pin mV and derived cell
+	  mV once at startup; measure the cell and scale this value by
+	  measured / derived.
 
 config ORANGELINK_BATTERY_GREEN_PERCENT
 	int "Green at or above this percent"

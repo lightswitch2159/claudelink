@@ -1211,12 +1211,23 @@ this would clip, and clipping is invisible -- every voltage above the limit read
 identically, which looks like a healthy battery regardless of the real state. The
 module therefore warns when a reading pins at full scale.
 
-**The divider ratio is still UNCALIBRATED.** `CONFIG_ORANGELINK_BATTERY_FULL_OHMS`
-/ `_OUTPUT_OHMS` default to the commonly cited 1M / 510k (ratio 2.96) for this
-board, which has *not* been verified against the hardware in hand. The module logs
-one calibration line at startup -- raw count, pin millivolts, derived cell
-millivolts -- so the ratio can be corrected by measuring the cell with a meter and
-scaling `FULL_OHMS`. Until that is done, treat the percentage as approximate.
+**Divider ratio, calibrated on the bench unit.** The module logs one calibration
+line at startup -- raw count, pin millivolts, derived cell millivolts.
+
+Measured: pin `1259 mV` where a meter read **3.78 V** across the cell. That gives a
+true ratio of 3.0024 against the nominal 2.9608 for 1M / 510k, i.e. **1.4% high** --
+consistent with 1% resistors plus ADC gain and offset error.
+`CONFIG_ORANGELINK_BATTERY_FULL_OHMS` is therefore set to **1531215**, not the
+nominal 1510000.
+
+That 1.4% was not cosmetic: it moved the reading from 3727 mV / **19% (red)** to
+3780 mV / **32% (yellow)**, across a threshold. A small ratio error matters most
+exactly where the curve is steep, which is where the warning colours live.
+
+`FULL_OHMS` is consequently a *calibration handle* rather than a resistance -- it
+absorbs resistor tolerance and ADC error as well as the divider ratio, so the
+calibrated value is expected to deviate from the nominal part values. Recalibrate
+per board: scale it by `measured / derived`.
 
 ### 14.4 Thresholds
 
@@ -1235,7 +1246,24 @@ its usable charge -- a linear map would read ~50% for most of the discharge and
 then collapse. It is good enough to pick a colour; it is not a fuel gauge, and
 during a transmit burst the measured voltage sags and reads low.
 
-### 14.5 Cost
+### 14.5 The BLE Battery Service reported a permanent 100%
+
+`CONFIG_BT_BAS=y` was already set, but **nothing ever called
+`bt_bas_set_battery_level()`**. Zephyr's BAS initialises its characteristic to 100,
+so every client -- AndroidAPS included -- read "100%" regardless of the cell. The
+value was not stale or miscalculated; it had never been written at all.
+
+Legacy did push this, from a timer handler:
+
+```c
+err_code = ble_bas_battery_level_update(&m_bas, Batt_GetLevel(), BLE_CONN_HANDLE_ALL);
+```
+
+The port now sets the level on every battery sample. Worth noting the failure mode:
+an enabled-but-unwritten service is worse than a missing one, because the client
+displays a plausible value instead of nothing.
+
+### 14.6 Cost
 
 FLASH 45.39% (196 KB of 442 KB), RAM 18.59% (48728 B of 256 KB) with both modules
 enabled. Both are behind Kconfig (`ORANGELINK_LED`, `ORANGELINK_BATTERY`).
