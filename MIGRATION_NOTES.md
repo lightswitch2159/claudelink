@@ -1506,3 +1506,66 @@ toggles) and the orphaned Adafruit UF2 bootloader at `0xf4000`, so 14.7's UF2
 option is now permanently gone rather than merely unreachable.
 
 Wireless DFU is live, which is the point: the next update needs no probe.
+
+## 16. Device renamed, and charger current raised
+
+### 16.1 "OrangePro" -> "ClaudeLink"
+
+One line, because the name was already centralised:
+
+```
+CONFIG_BT_DEVICE_NAME="ClaudeLink"
+```
+
+`src/main.c` derives `ORANGELINK_DEFAULT_NAME`, the scan-response payload and the
+initial IPS custom name from that symbol, so nothing else changed. The name lives
+in the scan response rather than the advertising packet (see 8.x), which has room
+to spare -- 10 characters plus 2 bytes of header against a 31-byte budget.
+
+**AndroidAPS identifies the device by name, so its configuration must be updated**
+-- re-select the device in AAPS after this change. The BLE address is unchanged
+(`E6:B5:4D:8C:C1:B9`; it derives from the chip, not from the settings partition),
+so nothing needs re-pairing.
+
+### 16.2 Charger current: ~50 mA -> ~100 mA
+
+The XIAO selects charge current with P0.13: high-impedance input gives ~50 mA, an
+output driven low gives ~100 mA. Both apply during the constant-current phase only;
+the current tapers as the cell fills.
+
+Declared ACTIVE_LOW so the intent reads directly in code -- `GPIO_OUTPUT_ACTIVE`
+drives the pin low and selects the higher current, while `GPIO_INPUT` leaves it
+floating for the lower one:
+
+```
+chg_current: chg_current {
+        gpios = <&gpio0 13 GPIO_ACTIVE_LOW>;
+        label = "Charge current select";
+};
+```
+
+Set once in `battery_init()`, gated by `CONFIG_ORANGELINK_BATTERY_FAST_CHARGE`
+(default y). A failure is logged but not fatal -- it only leaves the charger at its
+default rate.
+
+> **Check the cell before enabling this.** 100 mA is 1C for a 100 mAh pack and 2C
+> for a 50 mAh one, above what small cells are rated to accept. The Kconfig help
+> says to leave it off below roughly 200 mAh.
+
+Verified in hardware rather than from the log, because the RTT window closed before
+the message was emitted:
+
+```
+PIN_CNF[13] = 0x00000003   DIR=output, input buffer disconnected, no pull
+DIR  bit13  = 1            output
+IN   bit13  = 0            driven low -> ~100 mA
+```
+
+Charge observed climbing 30% -> 36% over the session, consistent with the higher
+rate.
+
+**Method note.** A first pass at decoding `DIR` by hand got bit 13 wrong and very
+nearly recorded a working feature as broken. Reading `PIN_CNF[n]` directly is
+better than masking `DIR`/`IN` by eye: it reports direction, input buffer, pull and
+drive for one pin in a single word. Same lesson as 13.x, 14.9 and 15.4 -- check the
+artefact, and do the arithmetic with a tool.

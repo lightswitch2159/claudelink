@@ -41,6 +41,13 @@ static const struct adc_dt_spec vbatt =
 static const struct gpio_dt_spec vbatt_enable =
 	GPIO_DT_SPEC_GET(DT_NODELABEL(vbat_enable), gpios);
 
+/*
+ * Charger current select, P0.13. See the overlay for the polarity rationale.
+ * Driven once at init; the charger is hardware and needs no further attention.
+ */
+static const struct gpio_dt_spec chg_current =
+	GPIO_DT_SPEC_GET(DT_NODELABEL(chg_current), gpios);
+
 static uint16_t last_mv;
 static uint8_t last_percent = BATTERY_UNKNOWN_PERCENT;
 
@@ -282,6 +289,28 @@ int battery_init(void)
 	if (err) {
 		LOG_ERR("VBAT enable configure failed (%d)", err);
 		return err;
+	}
+
+	/*
+	 * Charge current. ACTIVE_LOW in devicetree, so OUTPUT_ACTIVE drives P0.13
+	 * low and selects ~100 mA; GPIO_INPUT leaves it high-impedance for ~50 mA.
+	 * A failure here is not fatal -- it only means the charger stays on its
+	 * default rate.
+	 */
+	if (gpio_is_ready_dt(&chg_current)) {
+		int cerr = gpio_pin_configure_dt(&chg_current,
+			IS_ENABLED(CONFIG_ORANGELINK_BATTERY_FAST_CHARGE)
+				? GPIO_OUTPUT_ACTIVE : GPIO_INPUT);
+
+		if (cerr) {
+			LOG_WRN("charge current select failed (%d)", cerr);
+		} else {
+			LOG_INF("charge current ~%u mA",
+				IS_ENABLED(CONFIG_ORANGELINK_BATTERY_FAST_CHARGE)
+					? 100U : 50U);
+		}
+	} else {
+		LOG_WRN("charge current GPIO not ready");
 	}
 
 	/* The divider needs a moment to settle before the first conversion. */

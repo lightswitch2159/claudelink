@@ -114,6 +114,18 @@ config ORANGELINK_BATTERY_YELLOW_PERCENT
 	default 20
 	range 0 100
 
+config ORANGELINK_BATTERY_FAST_CHARGE
+	bool "Select the 100 mA charge current (P0.13 driven low)"
+	default y
+	help
+	  The XIAO's charger current is selected by P0.13: high-impedance input
+	  gives ~50 mA, output driven low gives ~100 mA. Both apply during the
+	  constant-current phase only; current tapers as the cell fills.
+
+	  CHECK THE CELL FIRST. 100 mA is 1C for a 100 mAh pack and 2C for a 50 mAh
+	  one, which is above what small cells are rated to accept. Leave this off
+	  for anything under roughly 200 mAh.
+
 config ORANGELINK_BATTERY_HYSTERESIS
 	int "Percent a reading must recover before the colour rises"
 	default 3

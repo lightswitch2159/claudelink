@@ -53,6 +53,21 @@
 		 *
 		 * The board devicetree does NOT define this -- it is ours to get right.
 		 */
+		/*
+		 * Charger current select, P0.13.
+		 *
+		 * Output driven LOW selects ~100 mA; a high-impedance input (no pull
+		 * either way) selects ~50 mA. Declared ACTIVE_LOW so configuring the
+		 * pin as OUTPUT_ACTIVE drives it low and selects the higher current,
+		 * and so GPIO_INPUT leaves it floating for the lower one.
+		 *
+		 * Not in the board devicetree -- ours to declare.
+		 */
+		chg_current: chg_current {
+			gpios = <&gpio0 13 GPIO_ACTIVE_LOW>;
+			label = "Charge current select";
+		};
+
 		vbat_enable: vbat_enable {
 			gpios = <&gpio0 14 GPIO_ACTIVE_LOW>;
 			label = "VBAT read enable";
