@@ -23,8 +23,7 @@ the carrier has to replace one of them:
 Power architecture this implies:
 
 ```
-USB-C ──► charger (power path) ──► SYS ──┬──► LDO 3V3 ──► XIAO 3V3 pin + RFM69HCW
-                │                        └──► motor MOSFET
+USB-C ──► charger (power path) ──► SYS ──► LDO 3V3 ──► XIAO 3V3 pin + RFM69HCW
                 └──► BAT ──► 1S protection ──► cell ──► divider ──► XIAO AIN1
 ```
 
@@ -64,6 +63,10 @@ two stay in step:
   `ORANGELINK_BATTERY_FAST_CHARGE`.
 * Optionally consume the charger `STAT` output as a GPIO input so the status LED
   can distinguish charging from discharging.
+* Drop `&pwm1` and the `pwm1_default`/`pwm1_sleep` pinctrl entries from
+  `boards/xiao_ble.overlay` -- that was the motor, now out of scope, and removing
+  it releases D4/P0.04. There is no motor code in `src/` to delete; it only ever
+  existed in devicetree.
 
 ---
 
@@ -98,7 +101,7 @@ two stay in step:
 >
 > * **System rail and regulation.** Take the charger's power-path output as a
 >   `SYS` rail, and regulate it to 3.3 V with a low-dropout LDO sized for at least
->   250 mA continuous. This rail supplies the XIAO and the RFM69HCW. Prefer an LDO
+>   250 mA continuous. This rail supplies the XIAO, the RFM69HCW and the buzzer. Prefer an LDO
 >   over a switching regulator here: the RFM69HCW is a 916 MHz receiver and
 >   switching noise is the greater risk, while runtime is not a constraint with an
 >   1800 mAh cell. If you believe a buck-boost is justified to recover the bottom
@@ -157,8 +160,7 @@ two stay in step:
 >   possible, with no stubs, no vias if it can be avoided, and a continuous
 >   unbroken ground reference directly beneath it for the whole run. Flood ground
 >   either side with stitching vias along the length (coplanar waveguide), and
->   keep the trace away from the switching regulator, the USB lines and the motor
->   driver.
+>   keep the trace away from the regulator, the charger and the USB lines.
 > * Optionally also provide an **unpopulated edge-mount SMA footprint** on the
 >   same net as a build-time alternative, but design the trace for the u.FL path;
 >   do not route a T-junction feeding both, as the unused branch becomes a stub.
@@ -177,14 +179,12 @@ the stackup, dielectric and the calculated trace width in the design notes.
 > * RESET may be tied to its inactive state; the firmware never asserts it.
 >
 > ### Other I/O
-> * **Vibration motor** on D4 (P0.04): the XIAO GPIO cannot drive a motor
->   directly, so include a low-side N-channel MOSFET driver with a flyback diode
->   and a gate pull-down, plus a 2-pin connector.
 > * **Buzzer** on D5 (P0.05): magnetic buzzer with a driver transistor, or a
 >   piezo driven directly if that keeps it simpler.
-> * D1 (P0.03) and D3 (P0.29) are now taken by battery sense and charger status
->   above. Leave D6 (P1.11) and D7 (P1.12) unassigned, brought out to a 0.1 inch
->   expansion header with 3V3 and GND.
+> * D1 (P0.03) and D3 (P0.29) are taken by battery sense and charger status above.
+>   Leave D4 (P0.04), D6 (P1.11) and D7 (P1.12) unassigned, brought out to a
+>   0.1 inch expansion header with 3V3 and GND. D4 is analog capable (AIN2), so
+>   keep it free rather than using it for a digital-only function.
 > * Bring SWDIO, SWCLK, RESET, 3V3 and GND to a standard debug header. The module
 >   only exposes these as tiny underside test pads, which are painful to solder
 >   by hand and have already cost this project a bricked board.
@@ -223,5 +223,5 @@ Automated tools get these wrong often enough to be worth a checklist:
    than asserted, continuous ground directly under the whole run, no stub branch
    to an unpopulated SMA, u.FL keep-out respected on every layer, and the RF
    section not routed under or beside the switcher.
-7. **Flyback diode across the motor**, and the MOSFET gate pulled down so the
-   motor cannot twitch during reset.
+7. **If a magnetic buzzer is fitted**, flyback diode across the coil and the
+   MOSFET gate pulled down so it cannot sound during reset.

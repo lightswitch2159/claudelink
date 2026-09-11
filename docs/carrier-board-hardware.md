@@ -20,8 +20,9 @@ board must match; "new" means it is being added for this carrier.
 | D1 | P0.03 | **AIN1** | Battery sense divider tap | analog in | **new** |
 | D2 | P0.28 | AIN4 | RFM69 `DIO1` | in, IRQ | fixed |
 | D3 | P0.29 | AIN5 | Charger `STAT` | in | **new** |
-| D4 | P0.04 | AIN2 | Motor MOSFET gate | out, PWM | fixed |
+| D4 | P0.04 | **AIN2** | Spare, to expansion header | -- | **free** |
 | D5 | P0.05 | AIN3 | Buzzer drive | out, PWM | fixed |
+
 | D6 | P1.11 | none | RFM69 `DIO0` (see note) | in | suggested |
 | D7 | P1.12 | none | Spare, to expansion header | -- | free |
 | D8 | P1.13 | none | RFM69 `SCK` | out | fixed |
@@ -36,6 +37,9 @@ Notes:
 * **D1 is the only sensible battery-sense pin.** Of the pins that were free, only
   D1 (AIN1) and D3 (AIN5) are analog capable at all -- D6 and D7 are on port 1,
   which has no ADC. Do not swap D1 and D6.
+* **D4 is free** now the motor is out of scope, and it is `AIN2`, so it is the
+  obvious home for a second analog input if one is ever wanted. Bring it to the
+  expansion header rather than leaving it unrouted.
 * **`5V` must be left unconnected.** Driving it energises the module's VBUS and
   wakes its BQ25101 charger with no cell attached. That is the single most
   important line in this table.
@@ -94,12 +98,12 @@ re-check before ordering.
 | USB-C receptacle | TYPE-C-31-M-12 | **C165948** | 16-pin, power-oriented, very widely used |
 | USB ESD | USBLC6-2SC6 | **C7519** | ST original; HXY equivalent is C5261088 |
 | u.FL / IPEX MHF1 | I-PEX 20279-001E-03 | **C3173448** | 50 ohm, DC-9 GHz |
-| Motor / buzzer FET | AO3400A | **C20917** | logic-level N-ch, 30 V, JLC Basic |
+| Buzzer FET | AO3400A | **C20917** | logic-level N-ch, JLC Basic. Only needed for a magnetic buzzer; a piezo can be driven from D5 directly |
 
 Still to pick, deliberately not asserted here because I did not verify them:
-a 2-pin JST-PH 2.0 battery connector, the flyback diode (any SOD-123 fast diode,
-e.g. 1N4148W class), the buzzer itself, and 0603 passives. All are trivially
-available; take them from JLC's Basic library so they cost nothing extra.
+a 2-pin JST-PH 2.0 battery connector, the buzzer itself, and 0603 passives. All
+are trivially available; take them from JLC's Basic library so they cost nothing
+extra.
 
 ## 4. Key component values
 
@@ -137,18 +141,19 @@ I am recalling the constants, not reading them:
   source cannot deliver, VIN droops and it reduces charge current rather than
   collapsing. Add a CC decoder only if you want guaranteed high-current charging.
 
-### Motor driver
-AO3400A low-side, gate to D4 through ~100 ohm, **10 kohm gate-to-source pull-down**
-so the motor cannot twitch while the nRF is in reset, and a flyback diode across
-the motor. Drive from `SYS` rather than 3V3 -- no reason to put motor current
-through the LDO.
+### Buzzer
+A piezo element can be driven straight from D5. A magnetic buzzer needs current the
+GPIO cannot supply, so use the AO3400A low-side with a ~100 ohm gate resistor, a
+**10 kohm gate-to-source pull-down** so it cannot sound while the nRF is in reset,
+and a flyback diode across the coil. Either way it runs from 3V3; the load is small
+enough that there is no reason to tap `SYS`.
 
 ## 5. Power architecture
 
 ```
-USB-C ──► ESD ──► BQ24075 ──► SYS ──┬──► AP2112K-3.3 ──► 3V3 ──┬──► XIAO 3V3 pad
-           │         │              │                          └──► RFM69HCW
-          CC 5k1    ISET/ILIM       └──► motor MOSFET
+USB-C ──► ESD ──► BQ24075 ──► SYS ──► AP2112K-3.3 ──► 3V3 ──┬──► XIAO 3V3 pad
+           │         │                                       ├──► RFM69HCW
+          CC 5k1    ISET/ILIM                                └──► buzzer
                      │
                      └──► BAT ──► DW01A + FS8205A ──► cell ──► 1M/1M ──► XIAO D1
 ```
@@ -167,4 +172,3 @@ Roughly by how expensive the mistake is:
 3. `TS` biased so the charger will actually charge.
 4. Divider on the cell side of the protection FETs, with its 100 nF.
 5. u.FL keep-out honoured, 50 ohm feed, ground plane continuous beneath it.
-6. Motor flyback diode and gate pull-down.
