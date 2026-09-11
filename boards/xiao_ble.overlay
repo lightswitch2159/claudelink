@@ -23,13 +23,21 @@
 		/*
 		 * Legacy LED_0 / LED_1 were two discrete active-low GPIO and the
 		 * indication patterns synthesised yellow by driving both. The XIAO has
-		 * one common-anode RGB device, so periph/led/led.c becomes a colour
-		 * model rather than a two-pin model. User-visible change -- tracked in
-		 * MIGRATION_NOTES.md.
+		 * one RGB device, so src/indication/led.c is a colour model rather than
+		 * a two-pin model -- and it now shows battery charge rather than BLE
+		 * state. Both are user-visible changes, tracked in MIGRATION_NOTES.md.
 		 */
 		orangelink-led-r = &led0;
 		orangelink-led-g = &led1;
 		orangelink-led-b = &led2;
+	};
+
+	/*
+	 * ADC channel handle for the battery monitor. zephyr,user is the standard
+	 * place for an io-channel with no driver behind it.
+	 */
+	zephyr,user {
+		io-channels = <&adc 7>;
 	};
 
 	orangelink {
@@ -128,7 +136,16 @@
 
 	channel@7 {
 		reg = <7>;
-		zephyr,gain = "ADC_GAIN_1_6";
+		/*
+		 * Gain 1/4 with the 0.6 V internal reference gives a 2.4 V full
+		 * scale. Through the onboard divider (~0.338) a 4.2 V cell presents
+		 * about 1.42 V, which is 59% of range -- against 39% at gain 1/6,
+		 * so this is the better fit for a 1S LiPo.
+		 *
+		 * If the divider ratio turns out higher than ~0.57 this clips; the
+		 * battery module logs a warning when a reading pins at full scale.
+		 */
+		zephyr,gain = "ADC_GAIN_1_4";
 		zephyr,reference = "ADC_REF_INTERNAL";
 		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
 		zephyr,input-positive = <NRF_SAADC_AIN7>;

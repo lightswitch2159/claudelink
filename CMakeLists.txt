@@ -14,7 +14,16 @@ target_sources(app PRIVATE
   src/subg/subg.c
 )
 
-target_include_directories(app PRIVATE src src/encoding src/drivers/rf69 src/aps src/subg)
+if(CONFIG_ORANGELINK_LED)
+  target_sources(app PRIVATE src/indication/led.c)
+endif()
+
+if(CONFIG_ORANGELINK_BATTERY)
+  target_sources(app PRIVATE src/battery/battery.c)
+endif()
+
+target_include_directories(app PRIVATE src src/encoding src/drivers/rf69 src/aps src/subg
+                           src/indication src/battery)
 
 # Phase 3/4 will add:
 #   src/aps/       <- legacy/project/app/src/app_aps.c

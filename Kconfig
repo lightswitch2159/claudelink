@@ -43,11 +43,77 @@ config ORANGELINK_TX_LEGACY_TRUNCATE
 	bool "Transmit like the legacy firmware (fixed 255-byte frame, truncated)"
 	default n
 	help
-	  The legacy firmware left RegPayloadLength at 0xFF for transmit, so with
-	  PACKET1_FORMAT_FIXED every frame ran the full 255 bytes and was truncated
-	  mid-packet by forcing STANDBY once the FIFO drained. Setting the real
-	  payload length instead is cleaner and 10x faster, but the pump has only
-	  ever seen the truncated behaviour. Enable this to reproduce it exactly
-	  when diagnosing interoperability.
+	  Reproduces a 255-byte fixed frame truncated by forcing STANDBY once the
+	  FIFO has drained, for diagnosing interoperability.
+
+	  NOTE: this is NOT what the legacy firmware did, despite what this help
+	  text claimed until it was checked. Subg_SendPkt() calls
+	  Rf69_SetPayloadLen(len + 1) once per burst, so legacy sent correctly sized
+	  frames too. Kept only as a diagnostic knob.
+
+menu "Status LED and battery"
+
+config ORANGELINK_LED
+	bool "Onboard RGB status LED"
+	default y
+	help
+	  Drive the XIAO's onboard RGB LED as a battery-charge indicator: a 30 ms
+	  flash every 10 s, green / yellow / red by state of charge.
+
+	  NOTE this is not what the legacy firmware showed. Legacy used its two LEDs
+	  for BLE state (yellow when connected, red when advertising or
+	  disconnected) and red-steady only for low battery. That indication is
+	  deliberately not ported -- there is one RGB device here and charge was
+	  judged the more useful thing to show. See MIGRATION_NOTES.md.
+
+config ORANGELINK_BATTERY
+	bool "Battery monitor (1S LiPo on AIN7)"
+	default y
+	select ADC
+	help
+	  Periodically sample the cell through the XIAO's onboard divider and, when
+	  ORANGELINK_LED is set, colour the status LED by charge.
+
+if ORANGELINK_BATTERY
+
+config ORANGELINK_BATTERY_OUTPUT_OHMS
+	int "Divider low-side resistance (ohms)"
+	default 510000
+	help
+	  Lower leg of the XIAO's onboard battery divider, P0.31 to ground.
+
+config ORANGELINK_BATTERY_FULL_OHMS
+	int "Divider total resistance (ohms)"
+	default 1510000
+	help
+	  Both legs in series. Cell voltage is the measured pin voltage scaled by
+	  FULL_OHMS / OUTPUT_OHMS.
+
+	  UNCALIBRATED. The defaults are the commonly cited 1M / 510k for this
+	  board, giving a ratio of about 2.96, but this has not been verified
+	  against the hardware in hand. Measure the cell with a meter, compare it
+	  against the millivolts the battery module logs, and correct FULL_OHMS.
+
+config ORANGELINK_BATTERY_GREEN_PERCENT
+	int "Green at or above this percent"
+	default 60
+	range 0 100
+
+config ORANGELINK_BATTERY_YELLOW_PERCENT
+	int "Yellow at or above this percent, red below"
+	default 20
+	range 0 100
+
+config ORANGELINK_BATTERY_HYSTERESIS
+	int "Percent a reading must recover before the colour rises"
+	default 3
+	range 0 25
+	help
+	  Stops the colour flapping when the cell rests on a threshold, which it
+	  will under a bursty transmit load.
+
+endif # ORANGELINK_BATTERY
+
+endmenu
 
 source "Kconfig.zephyr"

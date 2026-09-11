@@ -1122,3 +1122,120 @@ Two self-inflicted detours while verifying the above, both the same shape as 10.
 **Lesson, restated: replay captured bytes verbatim wherever possible.** The
 measurements in 13.3 use the exact 21-byte frame AAPS sent, copied from an RTT
 capture, precisely so no local encoding step can invalidate the result.
+
+## 14. Status LED and battery monitor
+
+### 14.1 The LED now shows charge, not BLE state -- deliberate
+
+Legacy drove two discrete active-low LEDs, LED_0 (yellow) and LED_1 (red), as a
+bitmask, and used them for **BLE state**:
+
+| Legacy state | Indication |
+|---|---|
+| `INDICATE_CONNECTED` | 30 ms yellow flash every 10 s |
+| `INDICATE_ADV` / `INDICATE_DISCONNECTED` | 30 ms red flash every 10 s |
+| `INDICATE_LOW_POWER` | red steady |
+| `INDICATE_NONE_SN` | yellow steady |
+| boot | red 300 ms, yellow 300 ms, off 400 ms, once |
+
+Note that advertising and disconnected were visually identical, so the LED really
+only distinguished "connected" from "not connected".
+
+The XIAO has one onboard RGB device (led0 red P0.26, led1 green P0.30, led2 blue
+P0.06, all active-low), so this became a colour model rather than a two-pin
+bitmask -- yellow is red+green together.
+
+**Decision: the LED shows battery charge instead of BLE connection state.** Charge
+was judged more useful on a device whose connection state is already visible in the
+phone app. Consequences, stated plainly:
+
+* `src/indication/indication.c` -- the legacy `Idc_SetType()` priority machine --
+  **is not ported at all.** With colour spoken for by charge, there is nothing for
+  it to drive.
+* There is no longer any local indication of connected vs advertising.
+* `INDICATE_NONE_SN` and the factory-test indications have no equivalent.
+
+What *was* kept from legacy: every timing constant (`LED_TIME1` 30 ms,
+`LED_TIME2` 300 ms, `LED_TIME3` 400 ms, `LED_TIME4` 10000 ms) and the boot
+red/yellow/off announcement. A 30 ms flash every 10 s is ~0.3% duty, which is what
+makes a permanently-on indicator affordable on a cell.
+
+The two parallel legacy tables (`RED_LED_TWINKLE_PERIOD` / `RED_LED_TWINKLE_OP`,
+carrying the comment "must be defined according to the order of led control
+period") are folded into one table of `{ms, colour}` steps, so they cannot drift
+apart.
+
+### 14.2 The legacy battery code is not a LiPo profile and was not ported
+
+`app_battery.c` was written for a ~3.2 V cell:
+
+```c
+#define BAT_MAX_VOLTAGE 3200                       /* mV */
+voltageTable[]    = {3100, 3000, 2900, 2800, 2700, 2600, 2500, 2550, 2400};
+percentageTable[] = { 100,   90,   80,   70,   60,   50,   40,   30,   20};
+```
+
+A single-cell LiPo is 4.2 V charged with a ~3.0 V floor, so this curve is not
+merely miscalibrated -- it is the wrong chemistry and the wrong voltage range.
+Reused as-is it would peg a healthy LiPo off the top of the table and call a flat
+one healthy. **The scaling, the curve and the thresholds in `src/battery/` are all
+new.**
+
+Two defects in the legacy version, recorded because they are easy to reintroduce:
+
+1. **A dead table entry.** `{..., 2500, 2550, 2400}` is not monotonic, and the
+   lookup is "first entry below the measured voltage". At 2520 mV the search breaks
+   on 2500 and returns 40%; the 2550 mV row (30%) is unreachable for any input.
+2. **`BAT_ADC_MAX_VALUE 700`** is a raw-count constant with no stated reference or
+   gain, so the conversion cannot be checked against the hardware by reading the
+   code. Replaced with `adc_raw_to_millivolts_dt()` plus an explicit divider ratio.
+
+### 14.3 Hardware specifics
+
+**Pin change.** Legacy sampled P0.04 / AIN2 through an external divider. The XIAO
+reads AIN7 / P0.31 through its own onboard divider, gated by P0.14.
+
+**Sense enable is held on, not pulsed.** Seeed document that with P0.14 high the
+sense path is disabled and P0.31 may rise toward 3.6 V, risking the pin. Legacy
+pulsed its ADC around each sample; here the sense path is enabled once at init and
+left enabled, which removes the hazard window. Cost is the divider's standing
+current, about 2.8 uA at 4.2 V through ~1.5 Mohm.
+
+**ADC gain corrected.** The overlay originally specified `ADC_GAIN_1_6`, giving a
+3.6 V full scale against a divider output of ~1.42 V for a 4.2 V cell -- 39% of
+range. Changed to `ADC_GAIN_1_4` (2.4 V full scale, ~59% of range). Measured on
+hardware: `raw=2150 pin=1259 mV` out of 4095, i.e. 52% of scale, no clipping.
+
+If a different divider ratio ever puts the output above ~0.57 of the cell voltage
+this would clip, and clipping is invisible -- every voltage above the limit reads
+identically, which looks like a healthy battery regardless of the real state. The
+module therefore warns when a reading pins at full scale.
+
+**The divider ratio is still UNCALIBRATED.** `CONFIG_ORANGELINK_BATTERY_FULL_OHMS`
+/ `_OUTPUT_OHMS` default to the commonly cited 1M / 510k (ratio 2.96) for this
+board, which has *not* been verified against the hardware in hand. The module logs
+one calibration line at startup -- raw count, pin millivolts, derived cell
+millivolts -- so the ratio can be corrected by measuring the cell with a meter and
+scaling `FULL_OHMS`. Until that is done, treat the percentage as approximate.
+
+### 14.4 Thresholds
+
+Green at or above 60%, yellow 20-59%, red below 20%, with 3% hysteresis before the
+colour is allowed to rise again.
+
+Red begins at 20% rather than 15% because below roughly 20% a 1S LiPo is on the
+steep part of its curve (about 3.6 V falling to 3.3 V) and the remaining runtime is
+short, so a warning at 15% arrives with little margin. The hysteresis exists
+because a cell resting on a threshold will cross it repeatedly under a bursty
+transmit load; without it the colour changes every sample.
+
+Percentage comes from a piecewise-linear 1S LiPo open-circuit curve rather than a
+straight line between 4.2 V and 3.0 V, because a LiPo sits near 3.8 V for most of
+its usable charge -- a linear map would read ~50% for most of the discharge and
+then collapse. It is good enough to pick a colour; it is not a fuel gauge, and
+during a transmit burst the measured voltage sags and reads low.
+
+### 14.5 Cost
+
+FLASH 45.39% (196 KB of 442 KB), RAM 18.59% (48728 B of 256 KB) with both modules
+enabled. Both are behind Kconfig (`ORANGELINK_LED`, `ORANGELINK_BATTERY`).

@@ -23,6 +23,12 @@
 #include "drivers/rf69/rf69.h"
 #include "aps/aps.h"
 #include "subg/subg.h"
+#if defined(CONFIG_ORANGELINK_LED)
+#include "indication/led.h"
+#endif
+#if defined(CONFIG_ORANGELINK_BATTERY)
+#include "battery/battery.h"
+#endif
 
 LOG_MODULE_REGISTER(main, CONFIG_ORANGELINK_LOG_LEVEL);
 
@@ -326,6 +332,17 @@ int main(void)
 
 	LOG_INF("Orangelink NCS starting (%s)", CONFIG_BOARD_TARGET);
 
+	/*
+	 * LED first, so the boot flash overlaps the rest of init and a board that
+	 * fails later still shows it reached main(). Legacy did the same, calling
+	 * Idc_Init() early with a 100 ms settle and LED_ACT_CROSS_TWINKLE.
+	 */
+#if defined(CONFIG_ORANGELINK_LED)
+	if (led_init() == 0) {
+		led_boot_flash();
+	}
+#endif
+
 	ips_init(ips_event_handler);
 	ips_cus_name_set((const uint8_t *)ORANGELINK_DEFAULT_NAME,
 			 sizeof(ORANGELINK_DEFAULT_NAME) - 1);
@@ -352,6 +369,16 @@ int main(void)
 	k_work_schedule(&rf69_check_work, K_NO_WAIT);
 
 	aps_init();
+
+	/*
+	 * Battery last: it takes over the LED from the boot flash, and a failure
+	 * here must not stop the radio coming up.
+	 */
+#if defined(CONFIG_ORANGELINK_BATTERY)
+	if (battery_init() != 0) {
+		LOG_WRN("battery monitor unavailable; LED stays dark");
+	}
+#endif
 
 	/*
 	 * Nothing to do in the main thread. The legacy super-loop called
