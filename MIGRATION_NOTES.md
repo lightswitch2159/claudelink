@@ -1552,6 +1552,22 @@ default rate.
 > for a 50 mAh one, above what small cells are rated to accept. The Kconfig help
 > says to leave it off below roughly 200 mAh.
 
+The bench unit runs an **1800 mAh** cell, so 100 mA is **0.056C** -- nowhere near a
+safety limit, and the only real consideration is time:
+
+| | from 36% | from empty |
+|---|---|---|
+| 100 mA (this setting) | ~15 h | ~23 h |
+| 50 mA (fast charge off) | ~30 h | ~47 h |
+
+100 mA is the XIAO charger's maximum, so there is no firmware route to charging
+faster than the left column -- that would need external charging hardware. The
+figures include roughly 1.3x for the constant-voltage taper.
+
+A large cell also makes the readings steadier: voltage sag under a transmit burst
+scales with C-rate, and a 1800 mAh pack barely notices the radio, so the
+threshold hysteresis in 14.4 matters less here than it would on a small cell.
+
 Verified in hardware rather than from the log, because the RTT window closed before
 the message was emitted:
 

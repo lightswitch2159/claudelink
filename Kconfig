@@ -126,6 +126,11 @@ config ORANGELINK_BATTERY_FAST_CHARGE
 	  one, which is above what small cells are rated to accept. Leave this off
 	  for anything under roughly 200 mAh.
 
+	  The bench unit runs an 1800 mAh cell, where 100 mA is 0.056C -- so far
+	  below any limit that the only real consideration is charge time, and
+	  100 mA is the XIAO charger's maximum. Do not turn this off on that unit:
+	  50 mA would take about 30 hours from half charge.
+
 config ORANGELINK_BATTERY_HYSTERESIS
 	int "Percent a reading must recover before the colour rises"
 	default 3
