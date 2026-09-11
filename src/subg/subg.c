@@ -65,6 +65,11 @@ void subg_abort(void)
 	abort_flag = true;
 }
 
+void subg_clear_abort(void)
+{
+	abort_flag = false;
+}
+
 uint16_t subg_get_rx_count(void) { return rx_count; }
 uint16_t subg_get_tx_count(void) { return tx_count; }
 int16_t subg_get_last_rssi(void) { return last_rssi; }
@@ -185,6 +190,7 @@ int subg_send_pkt(const uint8_t *data, uint8_t len, uint8_t repeat_cnt,
 	}
 
 	tx_count++;
+	LOG_DBG("tx: %u bytes, repeat %u", len, repeat_cnt);
 
 	err = minimed_tx(data, len);
 	if (err) {
@@ -218,10 +224,38 @@ enum subg_rx_status subg_get_pkt(uint8_t *buf, uint8_t *len, uint32_t timeout_ms
 		return SUBG_RX_TIMEOUT;
 	}
 
-	abort_flag = false;
-
+	/*
+	 * Deliberately does NOT clear abort_flag.
+	 *
+	 * It used to, and that silently swallowed preemption: a send-and-listen
+	 * transmits first, so an abort arriving during the transmit was wiped the
+	 * moment the listen began, and the 25 s window ran to completion anyway.
+	 * Against AndroidAPS that showed up as zero interrupted receives while
+	 * dozens of commands were being refused behind a listen that should have
+	 * been cut short. The dispatcher clears it instead -- legacy
+	 * Subg_ClrIntFlg(), called once before running a command.
+	 */
 	rf69_set_mode(RF69_MODE_STANDBY);
 	rf69_set_payload_len(SUBG_MAX_PKT_LEN);
+
+	/*
+	 * Drain the FIFO before listening.
+	 *
+	 * Without this, residue from the transmit that just finished is still
+	 * sitting there, so the first read returns stale bytes -- and a 0x00 among
+	 * them trips the terminator check and aborts the receive at zero length,
+	 * immediately. Against AndroidAPS that looked like every 4000 ms
+	 * send-and-listen completing instantly with nothing heard.
+	 */
+	rf69_fifo_clear();
+	while (!rf69_fifo_is_empty()) {
+		uint8_t stale;
+
+		if (rf69_fifo_read_byte(&stale) != 0) {
+			break;
+		}
+	}
+
 	/* Clear any edge left over from a previous receive. */
 	k_sem_reset(&dio1_sem);
 	rf69_set_mode(RF69_MODE_RX);
@@ -280,9 +314,11 @@ enum subg_rx_status subg_get_pkt(uint8_t *buf, uint8_t *len, uint32_t timeout_ms
 	 * A zero-length receive is reported as a timeout here instead.
 	 */
 	if (count == 0) {
+		LOG_DBG("rx: nothing after %lld ms", k_uptime_get() - start);
 		return SUBG_RX_TIMEOUT;
 	}
 
+	LOG_INF("rx: %u bytes after %lld ms", count, k_uptime_get() - start);
 	rx_count++;
 	last_rssi = rf69_read_rssi(false);
 	*len = count;

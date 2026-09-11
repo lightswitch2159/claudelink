@@ -10,6 +10,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/conn.h>
+#include <zephyr/bluetooth/gatt.h>
 #include <zephyr/bluetooth/gap.h>
 #include <zephyr/bluetooth/hci.h>
 #include <zephyr/bluetooth/hci_types.h>
@@ -119,6 +120,19 @@ static K_WORK_DEFINE(adv_work, adv_work_fn);
  * Connection handling
  * ------------------------------------------------------------------------- */
 
+static void on_mtu_exchanged(struct bt_conn *conn, uint8_t err,
+			     struct bt_gatt_exchange_params *params)
+{
+	ARG_UNUSED(params);
+
+	if (err) {
+		LOG_WRN("MTU exchange failed (0x%02x); long writes will be used", err);
+		return;
+	}
+	LOG_INF("ATT MTU now %u (payload %u B)",
+		bt_gatt_get_mtu(conn), bt_gatt_get_mtu(conn) - 3);
+}
+
 static void on_connected(struct bt_conn *conn, uint8_t err)
 {
 	if (err) {
@@ -128,6 +142,23 @@ static void on_connected(struct bt_conn *conn, uint8_t err)
 
 	current_conn = bt_conn_ref(conn);
 	LOG_INF("connected");
+
+	/*
+	 * Ask for a larger ATT MTU.
+	 *
+	 * The legacy firmware got this from nrf_ble_gatt, which negotiated MTU
+	 * automatically on connect. Without it the link stays at the default 23-byte
+	 * MTU, so any write over 20 bytes -- which every real pump command is --
+	 * forces the client into prepare/execute long writes.
+	 */
+	{
+		static struct bt_gatt_exchange_params mtu_params;
+
+		mtu_params.func = on_mtu_exchanged;
+		if (bt_gatt_exchange_mtu(conn, &mtu_params)) {
+			LOG_WRN("MTU exchange could not be started");
+		}
+	}
 
 	/* Legacy started the APS and config command loops plus the battery timer
 	 * here. Aps_StartLoop() gated command processing on an active connection;

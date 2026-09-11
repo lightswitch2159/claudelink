@@ -808,3 +808,78 @@ Everything above is inference. Two things would settle it directly:
 instrumentation allows. Interoperability with the pump is unproven, and the
 remaining uncertainty sits mostly in the host-side protocol implementation rather
 than in the ported firmware.**
+
+---
+
+## 11. AndroidAPS reads the pump: what was actually wrong
+
+Against a real Minimed 722 (serial REDACTED) driven by AndroidAPS, the device now
+completes pump communication:
+
+```
+PumpModel: [raw=722, resolved=Medtronic_722]
+Medtronic 523/723 (Revel) REDACTED
+MedtronicPumpHistoryDecoder ... (history downloaded)
+postProcessSettings: Max Bolus / Max Basal read
+pumpDeviceState=Active
+```
+
+Firmware-side, the same window: **30 consecutive replies**, every one a full
+107-byte packet decoding to 71 bytes, response times ~115 ms.
+
+Zero `No response from RileyLink` after this build was flashed. All 727 in the
+AndroidAPS log fall between 20:32 and 21:02 and belong to earlier builds.
+
+### The four real defects
+
+1. **`CONFIG_BT_ATT_PREPARE_COUNT=0`** -- long writes rejected at the ATT layer, so
+   every real pump command was refused before reaching the APS handler. The legacy
+   firmware ran `nrf_ble_qwr` for exactly this. `verify_gatt.py` passed 41/41
+   because it only ever issued simple writes.
+2. **No MTU negotiation** -- legacy's `nrf_ble_gatt` did it automatically. Without
+   it the link stays at 23 bytes and the client is forced into long writes.
+3. **FIFO not drained before RX** -- residue from the preceding transmit was read
+   immediately, and a `0x00` among it tripped the terminator check, collapsing
+   every listen window to zero length.
+4. **Enqueue preemption** -- see below.
+
+### Preemption: faithful to legacy, and wrong
+
+Legacy called `Subg_SetIntFlg()` after a successful enqueue, aborting any
+in-flight receive. Reproducing it created a feedback loop: an aborted listen
+answers "no reply" in ~360 ms, AndroidAPS reads that as failure and retries
+immediately, and the retry aborts the next listen. Seventeen interrupted receives
+and zero replies across a full sweep, against a pump that answers in 115 ms when
+a listen is allowed to run.
+
+Removed. Commands queue (depth 4) and each listen runs its window. Abort is kept
+for disconnect, where cutting a listen short is correct.
+
+**Legacy fidelity is a default, not a goal.** Legacy's behaviour assumed a client
+that would not retry into the abort; AndroidAPS does.
+
+### Two of my own errors worth recording
+
+- **`tools/probe_722.py` double-encoded.** AndroidAPS sends the payload *raw* and
+  lets the firmware apply the encoding selected by `CMD_SET_SW_ENCODING`. My probe
+  pre-encoded 4b6b *and* asked the firmware to encode. Every silent probe I ran
+  was my tooling. Worse, I used that broken probe to "clear" the payload-length
+  hypothesis -- a conclusion that happened to be right, reached by an invalid
+  experiment.
+- **I misread the AndroidAPS log twice.** `Got data [DD]` looked like a stale
+  response; it was the correct acknowledgement to a register write.
+  `mDataQueue size is 421` looked like runaway desync; it was an abandoned reader
+  instance from a previous connection. Both sent me chasing problems that did not
+  exist.
+
+### Still open
+
+`pumpDeviceState=Sleeping` at 21:04:33, then `WakingUp` -> `PumpUnreachable` at
+21:07. Initial communication succeeds; waking the pump after it sleeps does not.
+`decodeModel` returns `Unknown_Device`, so replies arrive but do not decode --
+distinct from the "no response" failures above and not yet diagnosed.
+
+The wakeup burst is `CMD_SEND_AND_LISTEN` with `repeatCnt=200`. At ~13 ms per
+frame that is ~2.6 s of transmission; the legacy timing works out similar, so
+burst duration is not obviously the cause. Needs measurement, not assumption --
+the last time I reasoned about this without measuring I was wrong twice.

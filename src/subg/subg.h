@@ -73,8 +73,17 @@ int subg_send_pkt(const uint8_t *data, uint8_t len, uint8_t repeat_cnt,
  */
 enum subg_rx_status subg_get_pkt(uint8_t *buf, uint8_t *len, uint32_t timeout_ms);
 
-/** @brief Abort an in-flight receive, mirroring the legacy cmdIntFlag. */
+/** @brief Abort an in-flight receive, mirroring the legacy Subg_SetIntFlg(). */
 void subg_abort(void);
+
+/**
+ * @brief Clear a pending abort, mirroring the legacy Subg_ClrIntFlg().
+ *
+ * Must be called by the dispatcher immediately before running a command, NOT
+ * inside the receive. Clearing it on entry to subg_get_pkt() loses any abort
+ * that arrived while the preceding transmit was still in progress.
+ */
+void subg_clear_abort(void);
 
 uint16_t subg_get_rx_count(void);
 uint16_t subg_get_tx_count(void);

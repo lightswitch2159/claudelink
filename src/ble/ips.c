@@ -117,22 +117,48 @@ static ssize_t write_data(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 	int8_t rssi = 0;
 
 	/*
+	 * Prepare phase of a long write carries no data -- it only asks whether we
+	 * would accept the write. Answer yes; the payload arrives at execute time.
+	 */
+	if (flags & BT_GATT_WRITE_FLAG_PREPARE) {
+		return 0;
+	}
+
+	/*
 	 * Bounds check both len and offset.
 	 *
 	 * The legacy firmware did neither, which is the remotely reachable stack
 	 * overflow in Aps_PutCmd() -- see docs/aps-protocol-spec.md section 7.
-	 * Offset is a second, independent vector that the SoftDevice helper used
-	 * to absorb; Zephyr hands it to us raw.
+	 *
+	 * Offset is non-zero for the continuation chunks of a long write, so it is
+	 * honoured rather than rejected -- but the combination is still bounded, so
+	 * a hostile offset cannot walk off the end of the buffer.
 	 */
-	if (offset != 0) {
-		return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
-	}
-	if (len > IPS_DATA_MAX_LEN) {
+	if ((size_t)offset + len > IPS_DATA_MAX_LEN) {
 		return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 	}
 
-	memcpy(data_value, buf, len);
-	data_len = len;
+	memcpy(data_value + offset, buf, len);
+	data_len = offset + len;
+
+	/*
+	 * Dispatch only once the whole frame has arrived.
+	 *
+	 * A long write is replayed to this callback one chunk at a time at execute,
+	 * so firing per chunk would hand the APS layer truncated frames. Rather than
+	 * guess which chunk is last, use the protocol's own framing: byte 0 counts
+	 * everything after itself, so the frame is complete at data_value[0] + 1
+	 * bytes. A single simple write satisfies that immediately.
+	 *
+	 * A frame whose declared length never arrives is simply never dispatched,
+	 * which matches the legacy behaviour of silently dropping inconsistent
+	 * frames.
+	 */
+	if (data_len < (uint16_t)data_value[0] + 1) {
+		LOG_DBG("partial frame: have %u of %u bytes",
+			data_len, data_value[0] + 1);
+		return len;
+	}
 
 	/* Legacy attached the live connection RSSI to every DATA_RX event.
 	 * Zephyr has no direct equivalent; an HCI Read RSSI is needed. Wired up
@@ -140,7 +166,7 @@ static ssize_t write_data(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 	 */
 	evt.type = IPS_EVT_DATA_RX;
 	evt.data = data_value;
-	evt.len = len;
+	evt.len = data_len;
 	evt.rssi = rssi;
 
 	if (app_handler) {
@@ -175,15 +201,15 @@ static ssize_t write_cus_name(struct bt_conn *conn, const struct bt_gatt_attr *a
 {
 	struct ips_evt evt;
 
-	if (offset != 0) {
-		return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
+	if (flags & BT_GATT_WRITE_FLAG_PREPARE) {
+		return 0;
 	}
-	if (len == 0 || len > IPS_CUS_NAME_MAX_LEN) {
+	if (len == 0 || (size_t)offset + len > IPS_CUS_NAME_MAX_LEN) {
 		return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 	}
 
-	memcpy(cus_name, buf, len);
-	cus_name_len = len;
+	memcpy(cus_name + offset, buf, len);
+	cus_name_len = offset + len;
 
 	/*
 	 * The legacy handler persisted the name, then DELIBERATELY DISCONNECTED

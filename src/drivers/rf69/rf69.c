@@ -40,6 +40,20 @@ static const struct gpio_dt_spec rf69_dio1 =
 
 static bool initialised;
 
+/*
+ * Serialises RFM69 access.
+ *
+ * Held only across individual operations, never across a whole receive window,
+ * so a configuration write from the BLE callback can interleave between the FIFO
+ * polls of an in-flight listen. That is what allows CMD_UPDATE_REG to run inline
+ * the way the legacy firmware did, without the unsynchronised SPI race the
+ * legacy design actually had.
+ */
+K_MUTEX_DEFINE(rf69_lock);
+
+#define RF69_LOCK()   k_mutex_lock(&rf69_lock, K_FOREVER)
+#define RF69_UNLOCK() k_mutex_unlock(&rf69_lock)
+
 /* ------------------------------------------------------------------------- *
  * Raw register access
  *
@@ -62,7 +76,9 @@ int rf69_read_reg(uint8_t addr, uint8_t *value)
 		return -EINVAL;
 	}
 
+	RF69_LOCK();
 	err = spi_transceive_dt(&rf69_bus, &txs, &rxs);
+	RF69_UNLOCK();
 	if (err) {
 		return err;
 	}
@@ -322,10 +338,16 @@ int rf69_fifo_write(const uint8_t *data, uint16_t len)
 	};
 	const struct spi_buf_set txs = { .buffers = txb, .count = 2 };
 
+	int err;
+
 	if (data == NULL || len == 0) {
 		return -EINVAL;
 	}
-	return spi_write_dt(&rf69_bus, &txs);
+
+	RF69_LOCK();
+	err = spi_write_dt(&rf69_bus, &txs);
+	RF69_UNLOCK();
+	return err;
 }
 
 int rf69_fifo_write_byte(uint8_t b)
