@@ -674,23 +674,29 @@ At 16384 bps that should be about 6 ms. 136 ms is almost exactly 255 bytes of
 airtime.
 
 Cause: the 916 config uses `PACKET1_FORMAT_FIXED` with `PAYLOADLENGTH = 0xFF`, and
-the legacy driver **never set `PayloadLength` for TX**. So every transmission sent
-a full 255-byte frame, padding the tail with whatever the underrunning FIFO
-produced.
-
-The legacy firmware hid this: `wait_tx_done()` only waited for the FIFO to *drain*,
-and `rf_stop()` then forced SLEEP, truncating the transmission mid-packet. That
-works against a receiver which stops at the zero terminator, but it wastes airtime,
-radiates padding, and makes the send-and-listen turnaround far slower than
-necessary.
+this port initially never set `PayloadLength` for TX. So every transmission sent a
+full 255-byte frame, padding the tail with whatever the underrunning FIFO produced.
 
 `minimed_tx()` now sets `PayloadLength` to the real frame size (data + terminator).
-Measured **136 ms -> 13 ms**, a 10x reduction in airtime and turnaround.
+Measured **136 ms -> 13 ms**.
 
-> **DEVIATION to validate against the 722.** The pump has only ever seen the
-> truncated-255 behaviour. If it turns out to depend on that tail, revert to
-> drain-then-STANDBY. This is the first thing to check when real pump testing
-> starts.
+> **CORRECTION.** This section previously asserted that the legacy driver "never set
+> `PayloadLength` for TX", and filed the fix as a DEVIATION to validate against the
+> pump. Both claims were wrong. `Subg_SendPkt()` in
+> `legacy/project/app/src/app_subg.c` does exactly this, once per burst in its
+> per-mode setup:
+>
+> ```c
+> case SUBG_MODE_MINIMED_NAS:
+>         Rf69_SetMode(RF69_DEV_FREQ916N868, RF69_MODE_STANDBY);
+>         Rf69_SetOokBw200khz(RF69_DEV_FREQ916N868);
+>         Rf69_SetPayloadLen(RF69_DEV_FREQ916N868, len + 1);
+> ```
+>
+> So this is not a deviation -- it restores legacy behaviour. The only real
+> difference was *where* the call sits: per frame here, once per burst there. It is
+> now hoisted into `subg_send_pkt()` to match. The original claim was written
+> without checking the legacy source.
 
 ### 9.5 The loopback was testing a parallel reimplementation
 
@@ -999,3 +1005,120 @@ if (!medtronicUtil.isModelSet) { medtronicUtil.medtronicPumpModel = pumpModel }
 
 Same cause as the impossible `Max Bolus 6400` / `Max Basal 1574.4` warnings. Fixed
 by setting the pump type to 522/722 in the app.
+
+## 13. "Tuning is slow": measuring instead of guessing
+
+Reported symptom: getting to the point where AndroidAPS syncs history pages takes
+far longer than on the legacy firmware; once syncing starts, speed is normal.
+
+Two consecutive attempts to fix this by optimising the TX burst made things worse
+(9.5 below). This section is what happened when the path was finally profiled
+rather than reasoned about.
+
+### 13.1 The TX path is airtime-bound: 2.3% is software
+
+Per-stage timing inside `minimed_tx()` for a real 11-byte frame, on hardware:
+
+```
+tx profile len=11: standby=0us clear=30us write=122us ->tx=213us drain=15411us
+```
+
+365 us of software against **15411 us of airtime -- 2.3% overhead.** The frame is
+16-byte preamble + 4-byte sync + 12-byte payload = 256 bits at 16384 bps = 15.6 ms,
+which is what `drain` measures. A 201-frame burst takes 3.34 s wall clock, measured,
+and essentially all of it is radiated.
+
+There is nothing to win here. Earlier notes claimed "16.4 ms/frame against 9.3 ms
+airtime, 43% overhead" -- that airtime figure was computed without counting the
+preamble and sync word, and every optimisation attempt built on it was chasing
+7 ms that never existed.
+
+Legacy is not faster: `legacy/periph/rf69/rf69.c` uses the same
+`RF_BITRATEMSB_16384` and the same `RF_PREAMBLESIZE_LSB_VALUE` (0x10 = 16 bytes),
+so its frames cost the same 15.6 ms.
+
+### 13.2 The delay is AndroidAPS-side, and not in the burst at all
+
+Gaps between successive commands from AAPS, one session, RTT timestamps:
+
+```
+tune phase   7.830  7.831  7.829  7.830  7.920  9.091  9.090  ...
+sync phase   0.450  0.390  0.420  0.480  0.450  0.720  0.810  ...
+```
+
+Both phases issue the **same** command -- `14 05 00 00`, `CMD_SEND_AND_LISTEN`
+with `repeatCnt = 0`, one frame -- differing only in listen timeout (1250 ms vs
+4000 ms) and pump opcode. Firmware radio time is 133-134 ms in both.
+
+So during tune the firmware is **idle for ~7.7 s per command**, waiting on AAPS.
+The 9.090 s gaps are 7.83 + 1.26, i.e. the same fixed delay plus a 1250 ms listen
+that timed out -- which confirms the gap is `fixed AAPS delay + radio time`.
+
+16 tune steps x 7.83 s is the ~125 s the user observed. None of it is transmit time,
+and no firmware change can shorten it.
+
+A further wrong premise died here too: the claim that AAPS sends "31 commands with
+`repeatCnt=200`, ~102 s of bursts". In the captured session exactly **two**
+commands used `repeatCnt=0xc8`. The histogram of every command sent:
+
+```
+  25  14 05 00 00     send_and_listen, repeatCnt=0
+   2  14 05 00 c8     send_and_listen, repeatCnt=200
+  19  03 06 xx xx     update_reg (frequency)
+```
+
+### 13.3 RSSI was measured on empty air (the actual bug this found)
+
+Reply RSSI on consecutive identical commands at a fixed frequency, pump inches
+away: `-51, -94, -93, -92, -79, -59, -56, -95, -96`. A 45 dB swing across a static
+bench setup is not physical.
+
+12.1 moved the RSSI read to before the switch out of RX, which was necessary but
+not sufficient: it still sat *after* the whole packet had been drained from the
+FIFO. `RegRssiValue` is a live measurement of present received power, not a
+per-packet latch, so by then the pump had stopped transmitting and the reading was
+the noise floor -- the same -92..-97 dBm the boot-time survey reports for empty air.
+
+RSSI is now latched on the **first byte** of the packet, while the carrier is
+certainly still up. Measured on hardware, replaying the byte-identical AAPS frame:
+
+| | before | after |
+|---|---|---|
+| replies at/below -90 dBm | 13 / 30 (43%) | 0 / 14 (0%) |
+| median | -78 dBm | -62 dBm |
+| range | -96 .. -50 | -68 .. -50 |
+
+After the fix, ten consecutive reads at a fixed frequency give -50 to -54 dBm, a
+4 dB spread, which is what a static bench setup should look like.
+
+Because mmtune ranks frequencies purely by reply RSSI, a floor reading on ~43% of
+replies made the ranking meaningless -- the same failure mode as 12.1, one layer
+further in.
+
+### 13.4 The mode cache: added, profiled, removed
+
+Legacy `Rf69_SetMode()` caches the current mode and returns early when it already
+matches. That was ported here as a TX speedup, then removed once 13.1 showed
+software is 2.3% of a frame -- skipped register writes cannot matter.
+
+It also is not free. Legacy's own `minimed_tx()` comment says *"Rely on the
+sequencer to end Transmit mode after PacketSent is triggered"*, so after every
+transmit the hardware mode no longer matches the cache and a stale entry silently
+suppresses a later mode write. Carrying that failure mode for 0% is a bad trade.
+
+Worth noting it never helped legacy's TX loop either: each frame explicitly sets
+STANDBY then TX, so the cached value always differs and both writes always happen.
+
+### 13.5 Tooling errors, again
+
+Two self-inflicted detours while verifying the above, both the same shape as 10.x:
+
+* A replay script sent pump frames without first issuing `CMD_SET_SW_ENCODING`, so
+  the firmware transmitted raw bytes. The RTT line `7 B payload -> 7 B encoded`
+  (instead of `-> 11 B`) is the tell; the pump silently ignored everything.
+* A hand-computed wake-frame CRC was wrong (0x59 against the correct 0x4e). Caught
+  only by generating it with `tools/minimed.py` instead of by hand.
+
+**Lesson, restated: replay captured bytes verbatim wherever possible.** The
+measurements in 13.3 use the exact 21-byte frame AAPS sent, copied from an RTT
+capture, precisely so no local encoding step can invalidate the result.

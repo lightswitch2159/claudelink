@@ -157,6 +157,21 @@ static int rf69_wait_mode_ready(uint32_t timeout_us, uint32_t *elapsed_us)
 	return -ETIMEDOUT;
 }
 
+/*
+ * NOT CACHED, deliberately -- see MIGRATION_NOTES 12.x.
+ *
+ * Legacy Rf69_SetMode() keeps a cached copy of the current mode and returns early
+ * when it already matches. That was reproduced here on the assumption it was a TX
+ * speedup, then removed once the TX path was actually profiled: per frame the
+ * software costs 365 us against 15411 us of airtime (2.3%), so no amount of
+ * skipped register writes can matter.
+ *
+ * It is not free, either. The sequencer leaves TX on its own once PacketSent fires
+ * (legacy's own comment in minimed_tx() says so), so after every transmit the
+ * hardware mode no longer matches the cache. A stale entry silently suppresses a
+ * mode write -- exactly the kind of quiet failure that has cost this port the most
+ * time. Not worth carrying for 0%.
+ */
 int rf69_set_mode(enum rf69_mode mode)
 {
 	uint8_t opmode, bits;

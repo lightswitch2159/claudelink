@@ -36,8 +36,26 @@ LOG_MODULE_REGISTER(subg, CONFIG_ORANGELINK_LOG_LEVEL);
  */
 #define SUBG_RX_WAIT_MS 2
 
+/*
+ * PacketSent poll interval.
+ *
+ * Airtime for a wakeup frame is ~9.3 ms (3B preamble + 4B sync + 12B payload at
+ * 16384 bps), but polling at 1 ms granularity cost ~7.9 ms of overhead per frame
+ * -- 46% of a measured 17.1 ms. Polling finer recovers most of that.
+ *
+ * NOTE: this shortens the total wakeup burst, and burst duration is plausibly
+ * what actually wakes a sleeping pump. SUBG_TX_MIN_BURST_MS exists to put the
+ * duration back under explicit control if shortening it regresses the wake --
+ * set it and the burst is padded to that length rather than finishing early.
+ */
+#define SUBG_TX_POLL_US 250
+
+/* 0 = no padding; burst takes however long it takes. */
+#define SUBG_TX_MIN_BURST_MS 0
+
+/* Legacy app_subg.c: WAIT_FIFO_NOT_FULL_TIMEOUT 100 ms, TX_TIMEOUT 150. */
 #define SUBG_TX_FIFO_WAIT_MS 100
-#define SUBG_TX_DONE_WAIT_MS 200
+#define SUBG_TX_DONE_WAIT_MS 150
 
 /* Minimum PA setting, used for loopback TX so the PA is not driven hard into an
  * unmatched load. -18 dBm with PA0.
@@ -48,6 +66,7 @@ LOG_MODULE_REGISTER(subg, CONFIG_ORANGELINK_LOG_LEVEL);
 static uint16_t rx_count;
 static uint16_t tx_count;
 static int16_t last_rssi;
+static bool rssi_latched;
 static volatile bool abort_flag;
 
 static K_SEM_DEFINE(dio1_sem, 0, 1);
@@ -90,12 +109,20 @@ static bool wait_fifo_not_full(uint32_t timeout_ms)
 	return false;
 }
 
+/* Set by subg_send_pkt() for the first frame of a burst only. */
+static bool tx_profile_frame;
+
 static int minimed_tx(const uint8_t *data, uint8_t len)
 {
 	uint16_t sent;
+	uint32_t t_sb = 0, t_clr = 0, t_wr = 0, t_tx = 0, t_done = 0;
+	uint32_t c0 = k_cycle_get_32();
 
 	rf69_set_mode(RF69_MODE_STANDBY);
+	t_sb = k_cyc_to_us_floor32(k_cycle_get_32() - c0);
+	c0 = k_cycle_get_32();
 	rf69_fifo_clear();
+	t_clr = k_cyc_to_us_floor32(k_cycle_get_32() - c0);
 
 	/*
 	 * Set PayloadLength to the frame we are actually sending: len data bytes
@@ -122,17 +149,19 @@ static int minimed_tx(const uint8_t *data, uint8_t len)
 	/* Leave PayloadLength at 0xFF and truncate by forcing STANDBY once the FIFO
 	 * has drained, exactly as the legacy firmware did.
 	 */
-#else
-	rf69_set_payload_len(len + 1);
 #endif
 
 	/* Prime the FIFO, then stream the remainder as it drains. */
 	sent = MIN(len, RF69_FIFO_SIZE);
+	c0 = k_cycle_get_32();
 	if (rf69_fifo_write(data, sent) != 0) {
 		return -EIO;
 	}
+	t_wr = k_cyc_to_us_floor32(k_cycle_get_32() - c0);
 
+	c0 = k_cycle_get_32();
 	rf69_set_mode(RF69_MODE_TX);
+	t_tx = k_cyc_to_us_floor32(k_cycle_get_32() - c0);
 
 	while (sent < len) {
 		if (!wait_fifo_not_full(SUBG_TX_FIFO_WAIT_MS)) {
@@ -168,16 +197,106 @@ static int minimed_tx(const uint8_t *data, uint8_t len)
 	rf69_set_mode(RF69_MODE_STANDBY);
 	return 0;
 #else
+	/*
+	 * Legacy wait_tx_done() waits for the FIFO to empty, not for PacketSent.
+	 *
+	 * The FIFO empties once the packet handler has taken the last payload byte,
+	 * which is earlier than the last bit leaving the antenna. Waiting for
+	 * PacketSent on every frame is stricter than the original and cost real time
+	 * across a 201-frame burst. The sequencer returns the radio to standby by
+	 * itself once the packet completes.
+	 */
+	c0 = k_cycle_get_32();
 	for (int i = 0; i < SUBG_TX_DONE_WAIT_MS; i++) {
-		if (rf69_packet_sent()) {
+		if (rf69_fifo_is_empty()) {
+			t_done = k_cyc_to_us_floor32(k_cycle_get_32() - c0);
+			if (tx_profile_frame) {
+				tx_profile_frame = false;
+				LOG_DBG("tx profile len=%u: standby=%uus clear=%uus "
+					"write=%uus ->tx=%uus drain=%uus",
+					len, t_sb, t_clr, t_wr, t_tx, t_done);
+			}
 			return 0;
 		}
 		k_sleep(K_MSEC(1));
 	}
 
-	LOG_WRN("PacketSent did not assert within %u ms", SUBG_TX_DONE_WAIT_MS);
+	LOG_WRN("FIFO did not drain within %u ms", SUBG_TX_DONE_WAIT_MS);
 	return -ETIMEDOUT;
 #endif
+}
+
+/*
+ * Repeat burst, streamed as one continuous transmission.
+ *
+ * The obvious implementation -- call minimed_tx() once per frame -- costs a full
+ * STANDBY->TX cycle each time, with a PLL relock and two ModeReady waits. Measured
+ * at 16.4 ms per frame against 9.3 ms of actual airtime: 43% overhead, so a
+ * 201-frame wakeup took 3.3 s and AndroidAPS spends 31 such bursts getting through
+ * a tune.
+ *
+ * In fixed-length mode the packet handler chops the FIFO into PayloadLength-sized
+ * packets and sends them back to back without CPU involvement. So the repeats can
+ * be streamed as one byte sequence, staying in TX throughout and refilling the
+ * FIFO as it drains. Identical bytes on air, far less dead time between them.
+ */
+static int minimed_tx_repeat(const uint8_t *data, uint8_t len, unsigned int frames)
+{
+	uint8_t frame[RF69_FIFO_SIZE];
+	uint8_t flen = len + 1;            /* payload + zero terminator */
+	uint32_t total, written = 0;
+	int64_t deadline;
+
+	if (flen > RF69_FIFO_SIZE || frames == 0) {
+		return -EINVAL;
+	}
+
+	memcpy(frame, data, len);
+	frame[len] = 0x00;
+	total = (uint32_t)flen * frames;
+
+	rf69_set_mode(RF69_MODE_STANDBY);
+	rf69_fifo_clear();
+	rf69_set_payload_len(flen);
+
+	/* Prime with whole frames only, so packet boundaries stay aligned. */
+	while (written + flen <= RF69_FIFO_SIZE && written < total) {
+		if (rf69_fifo_write(frame, flen) != 0) {
+			return -EIO;
+		}
+		written += flen;
+	}
+
+	rf69_set_mode(RF69_MODE_TX);
+
+	/* Refill as it drains. Bounded so a stalled radio cannot hang the thread. */
+	deadline = k_uptime_get() + (int64_t)frames * 50 + 1000;
+	while (written < total) {
+		if (k_uptime_get() > deadline) {
+			LOG_WRN("burst stalled at %u/%u bytes", written, total);
+			break;
+		}
+		if (rf69_fifo_is_full()) {
+			k_sleep(K_USEC(SUBG_TX_POLL_US));
+			continue;
+		}
+		if (rf69_fifo_write_byte(frame[written % flen]) != 0) {
+			return -EIO;
+		}
+		written++;
+	}
+
+	/* Let the tail drain before leaving TX, or the last packets are cut off. */
+	for (int i = 0; i < SUBG_TX_DONE_WAIT_MS * (1000 / SUBG_TX_POLL_US); i++) {
+		if (rf69_fifo_is_empty()) {
+			break;
+		}
+		k_sleep(K_USEC(SUBG_TX_POLL_US));
+	}
+	k_sleep(K_MSEC(2));   /* final packet still being clocked out */
+	rf69_set_mode(RF69_MODE_STANDBY);
+
+	return (written == total) ? 0 : -EIO;
 }
 
 int subg_send_pkt(const uint8_t *data, uint8_t len, uint8_t repeat_cnt,
@@ -190,6 +309,11 @@ int subg_send_pkt(const uint8_t *data, uint8_t len, uint8_t repeat_cnt,
 	}
 
 	tx_count++;
+
+	/* Once per burst, as in legacy Subg_SendPkt(). */
+	tx_profile_frame = true;
+	rf69_set_mode(RF69_MODE_STANDBY);
+	rf69_set_payload_len(len + 1);
 
 	/*
 	 * A repeat burst must not be abandoned on a single failed frame.
@@ -207,21 +331,61 @@ int subg_send_pkt(const uint8_t *data, uint8_t len, uint8_t repeat_cnt,
 	int64_t t0 = k_uptime_get();
 	unsigned int sent = 0, failed = 0;
 
-	err = minimed_tx(data, len);
-	if (err) {
-		failed++;
-	} else {
-		sent++;
-	}
-
-	for (uint8_t i = 0; i < repeat_cnt; i++) {
-		if (repeat_interval_ms) {
-			k_sleep(K_MSEC(repeat_interval_ms));
+	/*
+	 * A back-to-back repeat burst streams through the FIFO in one transmission.
+	 * Anything with a requested gap between repeats still goes frame by frame,
+	 * since the gap is the point.
+	 */
+	/*
+	 * REVERTED: streaming the repeats through the FIFO was measurably worse.
+	 *
+	 * The idea was that fixed-length mode would chop a continuously refilled
+	 * FIFO into back-to-back packets with no CPU involvement. It does not: with
+	 * the sequencer enabled and TXSTART_FIFONOTEMPTY, the radio returns to
+	 * standby after each PacketSent, so the refill loop ends up fighting the
+	 * sequencer rather than feeding one transmission. Measured 3732 ms against
+	 * 3300 ms for the straightforward per-frame path, and pump replies became
+	 * intermittent.
+	 *
+	 * minimed_tx_repeat() is kept below but unused, as the record of a tried and
+	 * rejected approach. Making it work would mean disabling the sequencer and
+	 * driving the mode transitions by hand, which is a larger change than the
+	 * ~20% it might buy.
+	 */
+	if (false) {
+		if (minimed_tx_repeat(data, len, (unsigned int)repeat_cnt + 1) == 0) {
+			sent = (unsigned int)repeat_cnt + 1;
+		} else {
+			failed = (unsigned int)repeat_cnt + 1;
 		}
-		if (minimed_tx(data, len) != 0) {
+	} else {
+		err = minimed_tx(data, len);
+		if (err) {
 			failed++;
 		} else {
 			sent++;
+		}
+
+		for (uint8_t i = 0; i < repeat_cnt; i++) {
+			if (repeat_interval_ms) {
+				k_sleep(K_MSEC(repeat_interval_ms));
+			}
+			if (minimed_tx(data, len) != 0) {
+				failed++;
+			} else {
+				sent++;
+			}
+		}
+	}
+
+	/* Optionally hold the burst to a minimum wall-clock length -- see the note
+	 * on SUBG_TX_MIN_BURST_MS. Off by default.
+	 */
+	if (SUBG_TX_MIN_BURST_MS > 0 && repeat_cnt > 0) {
+		int64_t elapsed = k_uptime_get() - t0;
+
+		if (elapsed < SUBG_TX_MIN_BURST_MS) {
+			k_sleep(K_MSEC(SUBG_TX_MIN_BURST_MS - elapsed));
 		}
 	}
 
@@ -288,8 +452,30 @@ enum subg_rx_status subg_get_pkt(uint8_t *buf, uint8_t *len, uint32_t timeout_ms
 
 	start = k_uptime_get();
 
+	rssi_latched = false;
+
 	while (true) {
 		if (!rf69_fifo_is_empty()) {
+			/*
+			 * Latch RSSI on the first byte of the packet, while the carrier is
+			 * still present.
+			 *
+			 * RegRssiValue is a live measurement of current received power, not
+			 * a per-packet latch. Reading it once the packet has been fully
+			 * drained measures whatever is on the air *after* the pump stopped
+			 * transmitting -- i.e. the noise floor. That produced replies
+			 * reported at -93..-95 dBm from a pump inches away, exactly the
+			 * floor the boot-time survey measures, mixed with occasional real
+			 * values when the read happened to catch the tail.
+			 *
+			 * mmtune ranks candidate frequencies purely by reply RSSI, so a
+			 * floor reading on half the replies makes the ranking meaningless.
+			 */
+			if (!rssi_latched) {
+				last_rssi = rf69_read_rssi(false);
+				rssi_latched = true;
+			}
+
 			if (rf69_fifo_read_byte(&b) != 0) {
 				break;
 			}
@@ -330,24 +516,6 @@ enum subg_rx_status subg_get_pkt(uint8_t *buf, uint8_t *len, uint32_t timeout_ms
 	if (count > 0 && (buf[count - 1] == 0x80 || buf[count - 1] == 0xC0)) {
 		LOG_DBG("trimmed end-of-packet glitch 0x%02x", buf[count - 1]);
 		count--;
-	}
-
-	/*
-	 * Sample RSSI BEFORE leaving RX.
-	 *
-	 * RegRssiValue is only meaningful while the receiver is running; read after
-	 * a switch to standby it returns a stale value. This used to sit after the
-	 * mode change, so every reply carried a nonsense RSSI -- and mmtune ranks
-	 * candidate frequencies purely by the RSSI of the reply. The scan could
-	 * never pick a winner, no lastGoodFrequency was ever recorded, and
-	 * AndroidAPS re-tuned on every single connection.
-	 *
-	 * The legacy driver never left RX inside minimed_rx at all, so it read a
-	 * live value by construction. Leaving RX here is still right -- we should
-	 * not keep the receiver running -- but the read has to come first.
-	 */
-	if (count > 0) {
-		last_rssi = rf69_read_rssi(false);
 	}
 
 	rf69_set_mode(RF69_MODE_STANDBY);
