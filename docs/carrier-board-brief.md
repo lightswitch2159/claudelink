@@ -84,9 +84,32 @@ over-discharge, over-current, short-circuit). Cell balancing does not apply.
 > | NSS (chip select) | D0 | P0.02 |
 > | DIO1 | D2 | P0.28 |
 >
-> * Antenna: a u.FL/IPEX connector **and** an alternative SMA footprint, with a
->   50 ohm controlled-impedance trace, kept short and away from the switching
->   regulator and USB. Solid ground pour and stitching vias under the RF section.
+> ### Antenna
+> * Fit a **u.FL / IPEX MHF1 surface-mount connector** as the antenna interface.
+>   This is the primary connector and must be populated. Place it at a board edge
+>   so a pigtail can exit cleanly, oriented so the cable does not run back across
+>   the radio or the USB connector.
+> * Honour the connector's keep-out: no copper, silkscreen or components inside
+>   the footprint's exclusion area on any layer, per the manufacturer's datasheet.
+> * Route from the RFM69HCW module's antenna pad to the u.FL centre pin as a
+>   **50 ohm controlled-impedance transmission line**, as short and straight as
+>   possible, with no stubs, no vias if it can be avoided, and a continuous
+>   unbroken ground reference directly beneath it for the whole run. Flood ground
+>   either side with stitching vias along the length (coplanar waveguide), and
+>   keep the trace away from the switching regulator, the USB lines and the motor
+>   driver.
+> * Optionally also provide an **unpopulated edge-mount SMA footprint** on the
+>   same net as a build-time alternative, but design the trace for the u.FL path;
+>   do not route a T-junction feeding both, as the unused branch becomes a stub.
+> * If the chosen RFM69HCW variant already carries its own u.FL connector rather
+>   than a bare antenna pad, say so and adjust: in that case the carrier's u.FL
+>   is redundant and the module's own connector should be used instead.
+
+**Impedance note for the stackup:** a 50 ohm microstrip on 1.6 mm two-layer FR4
+works out around 2.9 mm wide, which is not practical next to a u.FL pad. Use a
+four-layer stackup with a thin prepreg to layer 2 ground (roughly 0.9 mm trace for
+50 ohm), or a coplanar waveguide with tight ground clearance on two layers. State
+the stackup, dielectric and the calculated trace width in the design notes.
 > * The RFM69HCW transmits at up to +20 dBm and draws roughly 130 mA in bursts
 >   lasting several seconds. Size the power path and decoupling for that: bulk
 >   capacitance local to the radio plus the usual 100 nF per supply pin.
@@ -107,8 +130,10 @@ over-discharge, over-current, short-circuit). Cell balancing does not apply.
 >   are needed on the carrier beyond a charge-status LED.
 >
 > ### General
-> * Two-layer board is fine if the RF section can be kept clean; use four layers
->   if that gives a better ground plane under the radio.
+> * **Prefer a four-layer stackup**, primarily so the antenna trace has a solid
+>   ground plane on layer 2 at a spacing that makes a 50 ohm line a sensible
+>   width -- see the impedance note under Antenna. Two layers is acceptable only
+>   with a coplanar-waveguide feed and the stackup stated explicitly.
 > * All passives 0603 or larger for hand assembly.
 > * Mounting holes: 4x M2, one near each corner.
 > * Provide the schematic, a suggested placement, a BOM with manufacturer part
@@ -128,7 +153,9 @@ Automated tools get these wrong often enough to be worth a checklist:
 3. **Protection IC on the cell side of the charger**, not between charger and load.
 4. **Charge current resistor** actually computes to ~900 mA for the chosen part --
    check it against that part's datasheet formula rather than trusting the value.
-5. **Antenna trace impedance** and that the RF section is not routed under or
-   beside the switcher.
+5. **Antenna trace**: impedance actually calculated for the stated stackup rather
+   than asserted, continuous ground directly under the whole run, no stub branch
+   to an unpopulated SMA, u.FL keep-out respected on every layer, and the RF
+   section not routed under or beside the switcher.
 6. **Flyback diode across the motor**, and the MOSFET gate pulled down so the
    motor cannot twitch during reset.
