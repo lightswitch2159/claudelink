@@ -218,6 +218,27 @@ including any in this file. Practical approach:
   USB-C (this works even with a charge-only cable) and connect only
   SWDIO / SWCLK / GND.
 
+### Reading the log over RTT
+
+```bash
+pyocd reset -t nrf52840                       # probe must be free for this
+pyocd rtt   -t nrf52840 -M attach             # -M attach is load-bearing
+```
+
+Two traps, both of which look like "RTT is broken" when they are not:
+
+* **`-M attach` matters.** pyOCD's default connect mode *halts the core*, so the
+  board stops running and emits nothing. The session attaches cleanly, reports
+  "3 up channels ... Reading from up channel 0", and then sits silent forever.
+* **Only one pyOCD can hold the probe.** Running `pyocd reset` while `pyocd rtt`
+  is attached silently does nothing, so there is no boot output to see. Reset
+  first, then attach -- `CONFIG_LOG_PROCESS_THREAD_STARTUP_DELAY_MS=4000` holds
+  the boot burst long enough to catch it.
+
+Attaching to an already-running, healthy board correctly shows *nothing*: at idle
+the only periodic message is the battery sample every 3 minutes, and that is
+`LOG_DBG` unless the charge colour changes. Silence is not a fault.
+
 ### Flash over SWD
 
 ```bash
