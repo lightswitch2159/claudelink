@@ -1,0 +1,32 @@
+Comment,Designator,Footprint,LCSC Part #,Qty,Notes
+RFM69HCW-915S2R,U1,RFM69HCW SMD module,C5189430,1,"Verify variant: bare ANT pad vs onboard IPEX"
+BQ24075RGTR,U2,VQFN-16 3x3,C15464,1,Charger + DPPM power path
+DW01A,U3,SOT-23-6,C351410,1,1S protection controller
+FS8205A,Q1,SOT-23-6,C16052,1,Dual N-FET for DW01A
+AP2112K-3.3TRG1,U4,SOT-23-5,C51118,1,"3V3 LDO, 600 mA"
+TYPE-C 6P(073),J1,USB-C 6P SMD,C668623,1,"Power only: VBUS/GND/CC1/CC2"
+20279-001E-03,J2,u.FL / IPEX MHF1,C3173448,1,"Omit if U1 has its own IPEX"
+AO3400A,Q2,SOT-23,C20917,1,Buzzer low-side; omit if piezo driven from D5
+5.1k,"R1,R2",0603,,2,"CC1 and CC2 pull-downs, one each, NOT shared"
+1k,R3,0603,,1,"BQ24075 ISET ~890 mA -- VERIFY against datasheet"
+1.1k,R4,0603,,1,"BQ24075 ILIM ~1.4 A -- VERIFY against datasheet"
+TS bias,"R5,R6",0603,,2,"BQ24075 TS -- value per datasheet, or fit 10k NTC instead"
+100k,R7,0603,,1,"STAT pull-up to 3V3 (open drain) -> D3"
+330R,R8,0603,,1,DW01A VDD series
+2k,R9,0603,,1,DW01A CS series
+1M,"R10,R11",0603,,2,"Battery divider, cell side of protection FETs -> D1"
+10k,R12,0603,,1,RFM69 RESET pull-down
+100R,R13,0603,,1,Buzzer FET gate series
+10k,R14,0603,,1,Buzzer FET gate pull-down
+100k,R15,0603,,1,LDO EN pull-up to SYS
+10uF,"C1,C4",0603 16V X5R,,2,"VBUS bulk, SYS bulk"
+10uF,C5,0603 16V X5R,,1,RFM69 local bulk for multi-second TX bursts
+1uF,"C2,C3,C6,C7",0603 16V X5R,,4,"Charger IN, BAT, LDO in, LDO out"
+100nF,"C8,C9,C10",0603 50V X7R,,3,"DW01A, RFM69, battery divider tap"
+TVS 6V unidir,D1,SOD-123,,1,"OPTIONAL VBUS clamp -- fit footprint, populate at discretion"
+Flyback diode,D2,SOD-123,,1,Only if a magnetic buzzer is fitted
+Buzzer,LS1,per part,,1,Piezo or magnetic
+JST-PH 2-pin,J3,JST PH 2.0 2P,,1,Battery
+Header 1x4,J4,2.54mm,,1,"SWD: SWDIO, SWCLK, GND, 3V3"
+Header 1x5,J5,2.54mm,,1,"Expansion: D4, D6, D7, 3V3, GND"
+XIAO nRF52840,M1,XIAO 2x7 castellated,,1,Not JLC assembled -- hand solder or socket
