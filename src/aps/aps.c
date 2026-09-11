@@ -107,6 +107,21 @@ static struct k_thread aps_thread_data;
 
 static enum aps_encoding encoding = ENCODING_NONE;
 static uint8_t freq_reg[3] = { 0x12, 0x14, 0x83 };  /* legacy default: 433.92 MHz */
+
+/*
+ * Set when the host changes a frequency register; applied to the radio just
+ * before the next radio command, never from the BLE callback.
+ *
+ * CMD_UPDATE_REG runs inline so it cannot be dropped behind a long listen. But
+ * applying it inline retuned the radio DURING a transmit: a 201-frame wakeup
+ * burst takes ~3.9 s, AndroidAPS writes three frequency registers inside that
+ * window, and the burst ended up scattered across three frequencies. A sleeping
+ * pump never hears a coherent burst on any of them, so it never wakes.
+ *
+ * Deferring the write also removes the SPI race that made me queue this command
+ * in the first place: the BLE callback now touches no radio register at all.
+ */
+static bool freq_pending;
 static uint8_t use_pkt_len;
 static bool active;
 
@@ -183,9 +198,17 @@ static uint32_t freq_from_regs(void)
 	return (uint32_t)(((uint64_t)reg * APS_RILEYLINK_FXOSC) >> 16);
 }
 
-static void apply_freq(void)
+/* Called from the APS thread only, immediately before a radio command. */
+static void apply_pending_freq(void)
 {
-	uint32_t hz = freq_from_regs();
+	uint32_t hz;
+
+	if (!freq_pending) {
+		return;
+	}
+	freq_pending = false;
+
+	hz = freq_from_regs();
 
 	if (hz < APS_FREQ_916_MIN || hz > APS_FREQ_916_MAX) {
 		/* Legacy logged and discarded, leaving the radio unchanged. Kept --
@@ -196,9 +219,30 @@ static void apply_freq(void)
 		return;
 	}
 
-	LOG_INF("tuning to %u Hz", hz);
 	if (rf69_set_freq(hz) != 0) {
 		LOG_ERR("rf69_set_freq failed");
+		return;
+	}
+
+	/*
+	 * Read the frequency back rather than trusting the write.
+	 *
+	 * A HackRF capture showed the radio transmitting on 916.5477 MHz -- the
+	 * config-table default -- while this function was logging every frequency
+	 * AndroidAPS asked for. The tune was being computed and logged but never
+	 * taking effect on the chip, so every mmtune candidate behaved identically
+	 * and the scan could never converge.
+	 */
+	{
+		uint32_t actual = rf69_get_freq();
+		int32_t err_hz = (int32_t)(actual - hz);
+
+		if (err_hz > 5000 || err_hz < -5000) {
+			LOG_ERR("tune FAILED: asked %u Hz, radio reads %u Hz (%+d)",
+				hz, actual, err_hz);
+		} else {
+			LOG_INF("tuned to %u Hz (radio reads %u)", hz, actual);
+		}
 	}
 }
 
@@ -260,16 +304,20 @@ static void cmd_update_reg(const uint8_t *p, uint16_t len)
 	case 0x09:
 	case 0x0A:
 	case 0x0B:
+		/* Record only. Applied by the APS thread before the next radio
+		 * command, so a change can never land mid-burst.
+		 */
 		freq_reg[addr - 0x09] = value;
-		apply_freq();
+		freq_pending = true;
 		break;
 	case 0x0C:
 		/* Legacy switched to MINIMED_WWL (868 MHz) on 0x59. That radio is not
-		 * fitted in this build, so the 916 configuration is simply reapplied.
+		 * fitted here, so the 916 configuration is reapplied instead -- and
+		 * deferred, for the same reason as the frequency registers.
 		 */
 		if (value == 0x59) {
-			LOG_INF("host requested Minimed mode; reapplying 916 config");
-			rf69_config_916();
+			LOG_INF("host requested Minimed mode; will reapply 916 config");
+			freq_pending = true;
 		}
 		break;
 	default:
@@ -390,6 +438,7 @@ static void respond_rx_status(enum subg_rx_status st, const uint8_t *pkt, uint8_
 /* CMD_GET_PKT: [listenChan][listenTimeout BE32] */
 static void cmd_get_pkt(const uint8_t *p, uint16_t len)
 {
+	apply_pending_freq();
 	uint8_t raw[SUBG_MAX_PKT_LEN] = { 0 };
 	uint8_t dec[SUBG_MAX_PKT_LEN] = { 0 };
 	uint8_t raw_len = 0;
@@ -431,6 +480,7 @@ static uint16_t trim_trailing_zero(const uint8_t *pkt, uint16_t len)
 /* CMD_SEND_PKT: [sendChan][repeatCnt][repeatIntvl BE16][preambleExtend BE16][payload...] */
 static void cmd_send_pkt(const uint8_t *p, uint16_t len)
 {
+	apply_pending_freq();
 	uint8_t enc[SUBG_MAX_PKT_LEN] = { 0 };
 	uint16_t payload_len, enc_len;
 	uint8_t repeat_cnt;
@@ -462,6 +512,7 @@ static void cmd_send_pkt(const uint8_t *p, uint16_t len)
  */
 static void cmd_send_and_listen(const uint8_t *p, uint16_t len)
 {
+	apply_pending_freq();
 	uint8_t enc[SUBG_MAX_PKT_LEN] = { 0 };
 	uint8_t raw[SUBG_MAX_PKT_LEN] = { 0 };
 	uint8_t dec[SUBG_MAX_PKT_LEN] = { 0 };

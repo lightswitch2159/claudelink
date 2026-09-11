@@ -883,3 +883,119 @@ The wakeup burst is `CMD_SEND_AND_LISTEN` with `repeatCnt=200`. At ~13 ms per
 frame that is ~2.6 s of transmission; the legacy timing works out similar, so
 burst duration is not obviously the cause. Needs measurement, not assumption --
 the last time I reasoned about this without measuring I was wrong twice.
+
+---
+
+## 12. Wake-from-sleep, and what a HackRF settled
+
+Three further firmware defects, plus one AndroidAPS configuration problem.
+
+### 12.1 RSSI was sampled after leaving RX
+
+```c
+rf69_set_mode(RF69_MODE_STANDBY);
+...
+last_rssi = rf69_read_rssi(false);   /* meaningless here */
+```
+
+`RegRssiValue` is only valid while the receiver is running. Read after a switch to
+standby it returns a stale value, so every reply carried a nonsense RSSI.
+
+That matters more than it looks: **mmtune ranks candidate frequencies purely by
+the RSSI of the reply.** With garbage there, the scan could never pick a winner,
+no `lastGoodFrequency` was ever recorded, and AndroidAPS re-tuned on every single
+connection -- 15 tune runs and 74 scans in one session, always ending on the
+916.550 fallback rather than a measured best.
+
+The legacy driver never left RX inside `minimed_rx`, so it read a live value by
+construction. Leaving RX is still correct; the read simply has to come first.
+
+### 12.2 A repeat burst abandoned itself on one failed frame
+
+`subg_send_pkt()` returned on the first error from `minimed_tx()`, so a single
+missed `PacketSent` inside a 201-frame wakeup burst truncated the whole thing --
+silently, because the command still returned a sensible status afterwards. Waking
+a sleeping pump depends on a sustained sequence. Failures are now counted and the
+burst continues, which is what the legacy driver did by having no error path here
+at all.
+
+### 12.3 Frequency changes landed in the middle of a transmit burst
+
+`CMD_UPDATE_REG` runs inline so it cannot be dropped behind a long listen
+(section 8.2). But applying it inline retuned the radio *during* a transmit: a
+201-frame burst takes ~3.4 s, AndroidAPS writes three frequency registers inside
+that window, and the burst ended up scattered across three frequencies. A sleeping
+pump never hears a coherent burst on any of them.
+
+Register writes are now recorded in the BLE callback and applied by the APS thread
+immediately before the next radio command. The frequency is therefore stable for
+the whole duration of any command -- and as a bonus the BLE callback no longer
+touches a radio register at all, which removes the SPI race that motivated
+queueing this command in the first place.
+
+### 12.4 Tune is now verified by read-back
+
+`apply_pending_freq()` reads `FRF` back and logs a mismatch:
+
+```
+tuned to 916549804 Hz (radio reads 916549743)
+```
+
+61 Hz is integer rounding in the FSTEP conversion. This exists because a HackRF
+capture showed bursts on 916.5477 MHz -- the config-table default -- while the log
+claimed a different frequency, and I concluded the tune never reached the chip.
+**That conclusion was wrong**: the captured bursts simply happened while the radio
+genuinely was at the default, and I had not correlated timestamps before drawing
+it. The read-back makes the question unambiguous rather than inferential, which is
+why it stays.
+
+### What the HackRF established
+
+Independent confirmation of things that were previously only inferred:
+
+| Measured | Result |
+|---|---|
+| Are we radiating? | Yes -- 31 dB over noise at a few inches |
+| Carrier frequency | 916.5477 MHz, matching the commanded value |
+| Burst duration | 3442 / 3443 / 3441 ms, matching `tx burst: ... 3441 ms` exactly |
+| Burst coherence | Single frequency, ~98% duty cycle across the burst |
+
+The first capture showed nothing at all and looked alarming; the gain was simply
+too low (`-a 0 -l 8 -g 12`). At `-a 1 -l 24 -g 30` the bursts are obvious. Worth
+remembering before concluding a transmitter is dead.
+
+### Current state
+
+```
+tx burst: 11 bytes x201 -> 201 sent, 0 failed, 3446 ms
+rx: 11 bytes  after 342 ms, rssi -93 dBm
+rx: 107 bytes after 116 ms, rssi -90 dBm
+```
+
+The pump answers the wakeup burst and RSSI is now a real measurement.
+
+**Open:** -86 to -93 dBm is weak for a pump a few inches away. The values are
+plausible rather than garbage, so mmtune can rank frequencies -- but if the
+reading is taken slightly late, or coupling is poor, tune quality suffers. Worth
+measuring against the HackRF's own estimate of the pump's signal.
+
+### Not a firmware problem: the reservoir
+
+AndroidAPS was configured as a 523/723 Revel while the pump is a 722. From its
+decoder:
+
+```kotlin
+val strokes = pumpModel.bolusStrokes   /* 40 for Revel, 10 for 522/722 */
+if (strokes == 40) startIdx = 2
+```
+
+On `0B 3E 00 00 ...`, a 722 reads `0x0B3E` = 287.8 U; a Revel reads offset 2,
+`0x0000` = 0.0. Its own `decodeModel` detected `raw=722` and discarded it, because
+a configured model is never overridden:
+
+```kotlin
+if (!medtronicUtil.isModelSet) { medtronicUtil.medtronicPumpModel = pumpModel }
+```
+
+Same cause as the impossible `Max Bolus 6400` / `Max Basal 1574.4` warnings. Fixed
+by setting the pump type to 522/722 in the app.

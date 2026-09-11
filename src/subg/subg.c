@@ -190,24 +190,50 @@ int subg_send_pkt(const uint8_t *data, uint8_t len, uint8_t repeat_cnt,
 	}
 
 	tx_count++;
-	LOG_DBG("tx: %u bytes, repeat %u", len, repeat_cnt);
+
+	/*
+	 * A repeat burst must not be abandoned on a single failed frame.
+	 *
+	 * This loop used to return on the first error from minimed_tx(), so one
+	 * missed PacketSent inside a 201-frame wakeup burst cut the whole burst
+	 * short. Waking a sleeping Medtronic pump depends on it hearing a sustained
+	 * sequence, so a truncated burst is the difference between waking and not --
+	 * and the failure is silent, because the command still returns a sensible
+	 * status afterwards.
+	 *
+	 * Errors are counted and reported instead. The legacy driver had no error
+	 * path here at all and simply kept transmitting.
+	 */
+	int64_t t0 = k_uptime_get();
+	unsigned int sent = 0, failed = 0;
 
 	err = minimed_tx(data, len);
 	if (err) {
-		return err;
+		failed++;
+	} else {
+		sent++;
 	}
 
 	for (uint8_t i = 0; i < repeat_cnt; i++) {
 		if (repeat_interval_ms) {
 			k_sleep(K_MSEC(repeat_interval_ms));
 		}
-		err = minimed_tx(data, len);
-		if (err) {
-			return err;
+		if (minimed_tx(data, len) != 0) {
+			failed++;
+		} else {
+			sent++;
 		}
 	}
 
-	return 0;
+	if (repeat_cnt > 0 || failed > 0) {
+		LOG_INF("tx burst: %u bytes x%u -> %u sent, %u failed, %lld ms",
+			len, repeat_cnt + 1, sent, failed, k_uptime_get() - t0);
+	} else {
+		LOG_DBG("tx: %u bytes", len);
+	}
+
+	/* Succeed if anything at all went out; a partial burst can still wake. */
+	return (sent > 0) ? 0 : -EIO;
 }
 
 /* ------------------------------------------------------------------------- *
@@ -306,6 +332,24 @@ enum subg_rx_status subg_get_pkt(uint8_t *buf, uint8_t *len, uint32_t timeout_ms
 		count--;
 	}
 
+	/*
+	 * Sample RSSI BEFORE leaving RX.
+	 *
+	 * RegRssiValue is only meaningful while the receiver is running; read after
+	 * a switch to standby it returns a stale value. This used to sit after the
+	 * mode change, so every reply carried a nonsense RSSI -- and mmtune ranks
+	 * candidate frequencies purely by the RSSI of the reply. The scan could
+	 * never pick a winner, no lastGoodFrequency was ever recorded, and
+	 * AndroidAPS re-tuned on every single connection.
+	 *
+	 * The legacy driver never left RX inside minimed_rx at all, so it read a
+	 * live value by construction. Leaving RX here is still right -- we should
+	 * not keep the receiver running -- but the read has to come first.
+	 */
+	if (count > 0) {
+		last_rssi = rf69_read_rssi(false);
+	}
+
 	rf69_set_mode(RF69_MODE_STANDBY);
 
 	/*
@@ -318,9 +362,9 @@ enum subg_rx_status subg_get_pkt(uint8_t *buf, uint8_t *len, uint32_t timeout_ms
 		return SUBG_RX_TIMEOUT;
 	}
 
-	LOG_INF("rx: %u bytes after %lld ms", count, k_uptime_get() - start);
+	LOG_INF("rx: %u bytes after %lld ms, rssi %d dBm",
+		count, k_uptime_get() - start, last_rssi);
 	rx_count++;
-	last_rssi = rf69_read_rssi(false);
 	*len = count;
 	return SUBG_RX_OK;
 }
