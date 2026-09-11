@@ -1402,43 +1402,67 @@ A tally beats a single attempt. Six runs at 50 kHz gave 4x `No ACK` and 2x
 `FAULT ACK`, which is what "two faults stacked" looks like: the physical layer is
 intermittent, and when it does come up, APPROTECT is waiting behind it.
 
-### 15.2 APPROTECT re-arms itself every boot
+### 15.2 CORRECTION: APPROTECT was never the problem, and I caused a real one
 
-`CONFIG_NRF_APPROTECT_DISABLE` is **not selectable on nRF52840** -- it `depends on
-SOC_NRF54L_CPUAPP_COMMON`. For nRF52 the only sensible handling is
-`NRF_APPROTECT_USE_UICR` (ours), and `system_nrf52_approtect.h` does this at every
-boot:
+**This section previously claimed APPROTECT was re-arming every boot and that
+programming `UICR->APPROTECT = 0xFFFFFF5A` was the fix. That was wrong, and acting
+on it locked the chip.**
+
+The reasoning error was misreading which enum value applies to this part:
 
 ```c
-/* Load APPROTECT soft branch from UICR.
-   If UICR->APPROTECT is disabled, POWER->APPROTECT will be disabled. */
-NRF_APPROTECT->DISABLE = NRF_UICR->APPROTECT;
+#define UICR_APPROTECT_PALL_Enabled     (0x00UL)
+#define UICR_APPROTECT_PALL_HwDisabled  (0x5AUL)  /* hardware AND software controlled */
+#define UICR_APPROTECT_PALL_Disabled    (0xFFUL)  /* hardware controlled */
 ```
 
-On an erased chip `UICR->APPROTECT` is `0xFFFFFFFF`, whose low byte is not the
-magic `0x5A`, so **the access port is re-protected as soon as our firmware runs.**
-That leaves only the window between reset and `SystemInit`, which is exactly why
-one flash in ten succeeded and the rest reported `FAULT ACK`. It was never
-random.
+`0xFF` is itself a *disabled* value. So the erased `0xFFFFFFFF` already meant
+protection off, and the premise "UICR is not 0x5A, therefore the chip re-protects
+itself" was false. Writing `0x5A` -- the value for hardware-and-software-controlled
+devices -- **enabled** protection on this one:
 
-The permanent fix is `UICR->APPROTECT = 0xFFFFFF5A` at `0x10001208`:
+```
+NRF52840 APPROTECT enabled: not automatically unlocking [target_nRF52]
+Error: 'SoCTarget has no selected core'
+```
 
-* `UICR_APPROTECT_PALL` is bits[7:0] (`HwDisabled = 0x5A`), and
-  `APPROTECT_DISABLE_DISABLE` is *also* bits[7:0], so the upper bits are ignored.
-* `0xFFFFFF5A` only *clears* bits, which is all flash can do to an erased word.
-* UICR survives ordinary flashing. Only a mass erase reverts it.
+Recovery was a CTRL-AP mass erase, which resets UICR to `0xFFFFFFFF`. Worth
+recording: **pyocd reported the mass erase as failed, but it had completed inside
+the chip** -- ERASEALL is a single register write and the part erases internally,
+so pyocd only lost the link while polling ERASEALLSTATUS. Reading `0x10001208`
+back showed `ffffffff` and the lock was gone. Always read back before concluding a
+destructive operation failed.
 
-pyOCD can write it because its nRF52840 target maps UICR as a flash region
-(`start=0x10001000, length=0x400`). `tools/uicr-approtect-hwdisabled.hex` is that
-one word, and `tools/recover-swd.sh` programs it.
+The `FAULT ACK` readings that started this were real, but they were a *symptom of
+the power fault in 15.3*, not of access port protection.
 
-**The catch:** APPROTECT disables the AHB-AP, which is the same port a UICR write
-needs -- so the write itself must win the post-reset race. It is far likelier to
-than a flash was, being 4 bytes against 190 KB, and wiring nRESET (Pico GP1)
-removes the race entirely via `--connect under-reset`. Failing that, CTRL-AP mass
-erase stays reachable while the AHB-AP is disabled, but it is destructive.
+`tools/uicr-approtect-hwdisabled.hex` and `tools/recover-swd.sh` are deleted
+rather than fixed. Nothing in this project should write UICR->APPROTECT.
 
-### 15.3 pyocd commander exits 0 on a fatal error
+### 15.3 The actual cause: flashing from battery power
+
+The board was running on a part-charged LiPo with USB-C disconnected.
+
+Register reads succeeded. A 200 KB erase/program died partway with
+`Unexpected ACK '0'` -- **at every clock rate from 2 MHz down to 50 kHz**, and
+under every `--connect` mode. Erase and program draw far more current than reads,
+so the cell sagged and the link dropped mid-transfer.
+
+With USB-C connected, MCUboot flashed on the second attempt and the 217 KB
+application on the first.
+
+This is the diagnostic that matters, and it is the inverse of the usual advice:
+
+> Short transfers succeeding while long ones fail, *with no sensitivity to clock
+> rate*, is a power problem, not a signal-integrity problem. Clock rate is the
+> discriminator -- signal integrity improves as the clock drops; a sagging supply
+> does not care.
+
+The cost of not knowing this: each failed attempt left slot0 partly erased, so
+fifteen retries bricked a board that had been working, and recovery then needed
+MCUboot reflashed too.
+
+### 15.4 pyocd commander exits 0 on a fatal error
 
 Two successive versions of the recovery script reported a healthy link on a board
 that could not be flashed at all, because both gated on exit status:
@@ -1457,3 +1481,28 @@ text.
 **Lesson, and it is the same one as 14.9 and 13.5: verify the effect, not the
 return code.** An exit status, a build succeeding, and a Kconfig assignment are all
 claims about what was attempted, not evidence of what happened.
+
+### 15.5 Recovery outcome
+
+Chip fully erased and reflashed from a blank state. Verified over BLE rather than
+by trusting the flash log:
+
+```
+Orange* devices advertising: 1
+  E6:B5:4D:8C:C1:B9  'OrangePro'
+  SMP/DFU service 8d53dc1d-1db7-4cd3-868b-8a527460aa84: PRESENT
+    characteristic da2e7828-fbce-4e01-ae9e-261174997c48: present
+  Battery Level = 30%
+  total GATT services: 5
+```
+
+Radio self-test after the erase: `ALL PASSED`, `VERSION = 0x24`,
+`PA: PA0=0 PA1=1 PA2=1 power=27`.
+
+The BLE address survived the mass erase, so AndroidAPS does not need re-pairing --
+the identity is derived from the chip, not from the settings partition. What *was*
+lost with the erase: the settings/NVS contents (custom device name and indication
+toggles) and the orphaned Adafruit UF2 bootloader at `0xf4000`, so 14.7's UF2
+option is now permanently gone rather than merely unreachable.
+
+Wireless DFU is live, which is the point: the next update needs no probe.
