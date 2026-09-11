@@ -85,6 +85,15 @@
 };
 
 /*
+ * UART off. The board marks uart0 "okay" and claims D6/D7 through pinctrl; with
+ * logging moved to RTT only (see prj.conf) nothing uses it, and leaving the node
+ * enabled would keep the pins claimed. D6/D7 are consequently free.
+ */
+&uart0 {
+	status = "disabled";
+};
+
+/*
  * Both RFM69 radios share SPI2. Board pinctrl (spi2_default/spi2_sleep) is
  * already correct for D8/D9/D10, so only chip selects and the child nodes are
  * added here.

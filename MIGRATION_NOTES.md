@@ -1650,10 +1650,7 @@ nothing in reliability, which is unsurprising given legacy did the same thing.
 
 Both are secondary to 17.1 and neither has been measured:
 
-* **UART console and UART log backend are enabled** (`CONFIG_UART_CONSOLE`,
-  `CONFIG_LOG_BACKEND_UART`) alongside the RTT backend. An initialised UARTE on
-  nRF52 is not free. Dropping the UART backend in favour of RTT alone would also
-  free D6/D7 (see the pin allocation note in the overlay).
+* ~~**UART console and UART log backend are enabled**~~ -- **done, see 17.4.**
 * **No `CONFIG_PM_DEVICE`**, so peripherals are never suspended. Notably the legacy
   driver de-initialised the SPI bus between transfers while this port leaves it
   bound to Zephyr permanently -- a deliberate deviation recorded in the overlay for
@@ -1661,3 +1658,57 @@ Both are secondary to 17.1 and neither has been measured:
 
 The honest next step for both is a current measurement rather than more reasoning
 from datasheets.
+
+### 17.4 UART removed; RTT is the only backend
+
+Turning off `CONFIG_LOG_BACKEND_UART` alone would have saved nothing. The board marks
+`uart0` `"okay"`, so with `CONFIG_SERIAL=y` the nrfx UARTE driver still initialises
+the peripheral at boot whether or not anything logs to it.
+
+**Disabling `CONFIG_UART_CONSOLE` directly does not work either.** The board sets
+`BOARD_SERIAL_BACKEND_CDC_ACM=y`, and that block in
+`boards/common/usb/Kconfig.cdc_acm_serial.defconfig` carries
+`config UART_CONSOLE default CONSOLE`, which overrides an explicit `n` from
+`prj.conf`. Kconfig says so plainly if you read the build output:
+
+```
+warning: UART_CONSOLE (defined at boards/common/usb/Kconfig.cdc_acm_serial.defconfig:16,
+drivers/console/Kconfig:42) was assigned the value 'n' but got the value 'y'.
+```
+
+The fix is to disable the *backend choice*, not the symbol it forces:
+
+```
+CONFIG_BOARD_SERIAL_BACKEND_CDC_ACM=n
+CONFIG_SERIAL=n
+CONFIG_UART_CONSOLE=n
+CONFIG_LOG_BACKEND_UART=n
+```
+
+`&uart0` is also disabled in the overlay so the pins are released rather than merely
+unused, which genuinely frees D6/D7.
+
+Worth noting the devicetree console had been pointing at `board_cdc_acm_uart` while
+`CONFIG_USB_DEVICE_STACK` was never enabled, so UART console output had nowhere to
+go in the first place. `CONFIG_RTT_CONSOLE=y` was already set.
+
+**An implicit dependency came off with it.** That same CDC block sets
+`CONFIG_LOG_PROCESS_THREAD_STARTUP_DELAY_MS=4000` inside `if LOG`, which is what had
+been holding the log thread long enough for a debugger to attach before the boot
+burst flushed. Losing it truncated the boot log -- `[PASS] freque---`, with the
+self-test summary and register dump dropped. Set explicitly now.
+
+Verified: zero `was assigned the value` warnings, **zero UARTE symbols in the
+`.elf`** (the driver is gone, not merely idle), boot log complete with no
+truncation, `OPMODE = 0x00` at idle, and over BLE the device still advertises as
+`ClaudeLink` with the SMP/DFU service present and a live battery reading.
+
+Flash and RAM both fell, which is a useful cross-check that the driver really went:
+
+| | before | after |
+|---|---|---|
+| FLASH | 214704 B (48.55%) | **192412 B (43.51%)** |
+| RAM | 62084 B (23.68%) | **54220 B (20.68%)** |
+
+The power saving itself is still unmeasured -- see the note in 17.3 about needing a
+current meter rather than more datasheet arithmetic.
