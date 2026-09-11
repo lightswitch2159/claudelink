@@ -1291,10 +1291,19 @@ bootloader lives and `0x0` is where its MBR lives, so:
 So SWD is the only way to program this board, and restoring the UF2 bootloader
 would itself require SWD -- the recovery path depends on the thing that broke.
 
-**Recommended: implement the SMP-over-BLE DFU from 2.2.** It needs no pins, works
+**Resolved by 14.9: SMP-over-BLE DFU is now implemented.** It needs no pins, works
 over the link AndroidAPS already uses, and removes the single point of failure.
-MCUboot serial recovery over USB CDC is the alternative, but it needs a GPIO to
+MCUboot serial recovery over USB CDC was the alternative, but it needs a GPIO to
 enter recovery (D1 and D3 are free).
+
+Restoring UF2 instead was considered and rejected: the board's stock layout
+(`nordic/nrf52840_partition_uf2_sdv7.dtsi`) puts the application at `0x27000` with
+the bootloader at `0xf4000`, and Zephyr's `xiao_ble_defconfig` does set
+`CONFIG_BUILD_OUTPUT_UF2=y` -- so it is genuinely supported. But it costs MCUboot's
+signed dual-slot images and rollback, and it still needs one reliable SWD flash of
+the Seeed bootloader package to rebuild `0x0`. Flashing a bootloader over an
+intermittent probe risks a partial write with no recovery path at all, which is a
+worse failure than the one being fixed.
 
 ### 14.8 Verifying firmware without a probe
 
@@ -1309,3 +1318,60 @@ at `D1:A9:95:54:8E:38`, not the board at `E6:B5:4D:8C:C1:B9`, and that device
 reported 100%. A rescan showed only one `Orange*` device actually advertising.
 **Pin verification reads to an address, never a name** -- a name lookup can silently
 answer from a different device and the result looks perfectly plausible.
+
+### 14.9 SMP-over-BLE DFU, and a Kconfig trap worth knowing
+
+Implements MIGRATION_NOTES 2.2 and closes 14.7: upgrades now go over BLE with nRF
+Connect Device Manager, so a dead SWD probe no longer means no way to flash.
+
+**A silent Kconfig failure nearly shipped a no-op.** The first build looked
+successful and added only ~6 KB, which was the tell -- mcumgr and an SMP service
+cannot cost 6 KB. `CONFIG_MCUMGR` `depends on NET_BUF && ZCBOR`, and **Kconfig
+ignores an assignment whose dependencies are unmet without emitting any warning**.
+So `CONFIG_MCUMGR=y`, `CONFIG_MCUMGR_TRANSPORT_BT=y` and `CONFIG_MCUMGR_GRP_IMG=y`
+were all silently dropped, the build passed, and the image contained no DFU at all.
+
+It only surfaced by checking the artefact rather than the build result:
+
+```
+$ grep -E '^CONFIG_MCUMGR' build/zephyr/.config     # absent
+$ nm zephyr.elf | grep -ciE 'smp_bt|img_mgmt|mcumgr'
+0
+```
+
+After adding `CONFIG_NET_BUF=y` and `CONFIG_ZCBOR=y`:
+
+```
+$ nm zephyr.elf | grep -c ...   ->  96
+$ nm zephyr.elf | grep smp_bt_svc
+00039a74 R smp_bt_svc
+```
+
+**Lesson: a Kconfig option that does not appear in the resulting `.config` is not
+an error, and an undefined *symbol* warns while an unmet *dependency* does not.
+Verify a feature landed by looking for its symbols in the image, not by the build
+exiting zero.** (Only `MCUMGR_GRP_IMG_UPLOAD_CHECK_HASH`, which does not exist in
+this Zephyr, produced a real warning and aborted the build.)
+
+Cost, measured: FLASH 45.39% -> **48.51%** (196 KB to 214508 B, about +18 KB), RAM
+18.59% -> **23.68%** (+13 KB).
+
+**Images self-confirm on a delay, not at boot.** MCUboot runs a freshly uploaded
+image in test mode and reverts on the next reset unless something confirms it.
+`main()` therefore schedules `boot_write_img_confirmed()` 60 s after startup rather
+than calling it immediately -- confirming at boot would make every upload
+permanent, including one that crashes seconds later, and over-the-air that leaves
+no way to upload a replacement. An image that cannot stay up for a minute rolls
+itself back.
+
+**Advertising data is deliberately unchanged.** AAPS matches on it and that path is
+working, so the SMP UUID is not advertised; Device Manager can connect and discover
+the service anyway. If it ever fails to list the device, the SMP UUID
+(`8D53DC1D-1DB7-4CD3-868B-8A527460AA84`) fits in `scan_rsp` at 29 of 31 bytes,
+leaving the primary advertising packet untouched.
+
+**Bootstrap caveat.** This build has to reach the board over SWD once before
+wireless upgrades are possible, and at time of writing the probe is down
+(`Unexpected ACK '0'` on 8 consecutive attempts), so it is committed but not
+deployed. The board is still running the previous image -- which does have the
+calibration and Battery Service fixes, confirmed by reading 0x2A19 = 26%.

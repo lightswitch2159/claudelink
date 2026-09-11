@@ -29,6 +29,9 @@
 #if defined(CONFIG_ORANGELINK_BATTERY)
 #include "battery/battery.h"
 #endif
+#if defined(CONFIG_BOOTLOADER_MCUBOOT)
+#include <zephyr/dfu/mcuboot.h>
+#endif
 
 LOG_MODULE_REGISTER(main, CONFIG_ORANGELINK_LOG_LEVEL);
 
@@ -326,6 +329,38 @@ static void rf69_check_fn(struct k_work *work)
  * Entry point
  * ------------------------------------------------------------------------- */
 
+#if defined(CONFIG_BOOTLOADER_MCUBOOT)
+/*
+ * Mark the running image good, but only after it has proven it can run.
+ *
+ * MCUboot boots a freshly uploaded image in "test" mode. If nothing confirms it,
+ * the next reset reverts to the previous image -- which is exactly the safety net
+ * wanted for over-the-air updates, since a bad image otherwise leaves no way to
+ * upload a replacement.
+ *
+ * So this is deliberately NOT called from main(): confirming immediately would
+ * make every upload permanent, including one that crashes seconds later. Delaying
+ * it means an image that cannot stay up long enough gets rolled back on its own.
+ */
+#define IMG_CONFIRM_DELAY_MS 60000
+
+static void img_confirm_fn(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	if (boot_is_img_confirmed()) {
+		return;
+	}
+
+	if (boot_write_img_confirmed() == 0) {
+		LOG_INF("running image confirmed");
+	} else {
+		LOG_WRN("could not confirm image; MCUboot will revert on reset");
+	}
+}
+static K_WORK_DELAYABLE_DEFINE(img_confirm_work, img_confirm_fn);
+#endif /* CONFIG_BOOTLOADER_MCUBOOT */
+
 int main(void)
 {
 	int err;
@@ -378,6 +413,10 @@ int main(void)
 	if (battery_init() != 0) {
 		LOG_WRN("battery monitor unavailable; LED stays dark");
 	}
+#endif
+
+#if defined(CONFIG_BOOTLOADER_MCUBOOT)
+	k_work_schedule(&img_confirm_work, K_MSEC(IMG_CONFIRM_DELAY_MS));
 #endif
 
 	/*
