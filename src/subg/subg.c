@@ -294,7 +294,7 @@ static int minimed_tx_repeat(const uint8_t *data, uint8_t len, unsigned int fram
 		k_sleep(K_USEC(SUBG_TX_POLL_US));
 	}
 	k_sleep(K_MSEC(2));   /* final packet still being clocked out */
-	rf69_set_mode(RF69_MODE_STANDBY);
+	rf69_set_mode(RF69_MODE_SLEEP);
 
 	return (written == total) ? 0 : -EIO;
 }
@@ -396,6 +396,13 @@ int subg_send_pkt(const uint8_t *data, uint8_t len, uint8_t repeat_cnt,
 		LOG_DBG("tx: %u bytes", len);
 	}
 
+	/*
+	 * rf_stop(), once per burst -- exactly where legacy Subg_SendPkt() puts it,
+	 * after the repeat loop rather than after each frame. See the note in
+	 * subg_get_pkt() for why SLEEP and not STANDBY.
+	 */
+	rf69_set_mode(RF69_MODE_SLEEP);
+
 	/* Succeed if anything at all went out; a partial burst can still wake. */
 	return (sent > 0) ? 0 : -EIO;
 }
@@ -494,12 +501,12 @@ enum subg_rx_status subg_get_pkt(uint8_t *buf, uint8_t *len, uint32_t timeout_ms
 		}
 
 		if (abort_flag) {
-			rf69_set_mode(RF69_MODE_STANDBY);
+			rf69_set_mode(RF69_MODE_SLEEP);
 			return SUBG_RX_INTERRUPTED;
 		}
 
 		if (timeout_ms > 0 && (k_uptime_get() - start) > (int64_t)timeout_ms) {
-			rf69_set_mode(RF69_MODE_STANDBY);
+			rf69_set_mode(RF69_MODE_SLEEP);
 			return SUBG_RX_TIMEOUT;
 		}
 
@@ -518,7 +525,19 @@ enum subg_rx_status subg_get_pkt(uint8_t *buf, uint8_t *len, uint32_t timeout_ms
 		count--;
 	}
 
-	rf69_set_mode(RF69_MODE_STANDBY);
+	/*
+	 * SLEEP, not STANDBY, once the receive is over.
+	 *
+	 * Legacy's Subg_GetPkt() and Subg_SendPkt() both end in rf_stop(), which
+	 * sets RF69_MODE_SLEEP, and Rf69_DevParaCfg() leaves the radio asleep at
+	 * init. This port left it in STANDBY on every path, so the RFM69 was awake
+	 * permanently -- datasheet-typical 1.25 mA against 0.1 uA asleep, which on
+	 * this board swamps everything else in the idle budget.
+	 *
+	 * SPI still works in sleep, so deferred register writes (apply_pending_freq)
+	 * do not need the radio woken first.
+	 */
+	rf69_set_mode(RF69_MODE_SLEEP);
 
 	/*
 	 * Legacy returned SUBG_RX_OK even when count was 0, leaving *pRxLen
@@ -725,6 +744,12 @@ int subg_loopback_run(struct subg_loopback *out)
 	if (out) {
 		*out = r;
 	}
+	/* Leave the radio as the rest of the driver does: asleep unless in use.
+	 * Without this the boot-time register dump reports STANDBY and the
+	 * "asleep at idle" invariant is unverifiable from the log.
+	 */
+	rf69_set_mode(RF69_MODE_SLEEP);
+
 	return r.all_passed ? 0 : -EIO;
 }
 

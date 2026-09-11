@@ -280,6 +280,10 @@ int rf69_config_916(void)
 {
 	int err;
 
+	/* Legacy Rf69_DevParaCfg() ends with Rf69_SetMode(dev, RF69_MODE_SLEEP);
+	 * the radio is woken only for an actual transmit or receive.
+	 */
+
 	for (size_t i = 0; i < ARRAY_SIZE(rf69_cfg_916); i++) {
 		err = rf69_write_reg(rf69_cfg_916[i][0], rf69_cfg_916[i][1]);
 		if (err) {
@@ -295,7 +299,8 @@ int rf69_config_916(void)
 		return err;
 	}
 
-	return 0;
+	/* Leave the part asleep; it is woken only for a transmit or receive. */
+	return rf69_set_mode(RF69_MODE_SLEEP);
 }
 
 /* ------------------------------------------------------------------------- *

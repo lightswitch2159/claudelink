@@ -1585,3 +1585,79 @@ nearly recorded a working feature as broken. Reading `PIN_CNF[n]` directly is
 better than masking `DIR`/`IN` by eye: it reports direction, input buffer, pull and
 drive for one pin in a single word. Same lesson as 13.x, 14.9 and 15.4 -- check the
 artefact, and do the arithmetic with a tool.
+
+## 17. Power and sleep: one real regression, now fixed
+
+Asked directly whether the port mirrors the original's power behaviour. Mostly yes;
+one thing was badly wrong.
+
+### 17.1 The RFM69 was never put to sleep
+
+Legacy's lifecycle keeps the radio asleep unless it is actually in use:
+
+| Legacy site | Action |
+|---|---|
+| `Rf69_DevParaCfg()` | ends with `Rf69_SetMode(dev, RF69_MODE_SLEEP)` |
+| `Subg_SendPkt()` | `rf_stop()` after the repeat loop -> SLEEP |
+| `Subg_GetPkt()` | `rf_stop()` after the receive -> SLEEP |
+
+This port set `RF69_MODE_STANDBY` on **every** path and never once used
+`RF69_MODE_SLEEP` -- the enum value and its register mapping existed with no call
+site. The boot register dump showed it plainly: `0x01 OPMODE = 0x04`, which is
+`RF_OPMODE_STANDBY`.
+
+Datasheet-typical for the SX1231/RFM69 is **1.25 mA in standby against 0.1 uA
+asleep**, so the radio was awake permanently and dominated the idle budget by more
+than an order of magnitude over everything else on the board.
+
+Rough figures for the 1800 mAh cell -- **estimates from datasheet numbers, not
+measurements**, and worth confirming with a meter:
+
+| | idle current | 1800 mAh lasts |
+|---|---|---|
+| before (radio in STANDBY) | ~1.3 mA | ~8 weeks |
+| after (radio asleep) | ~50-80 uA | well over a year, where self-discharge starts to dominate |
+
+Fixed by mirroring legacy exactly: SLEEP at the end of `rf69_config_916()`, once
+per burst at the end of `subg_send_pkt()` (after the repeat loop, where
+`Subg_SendPkt()` puts `rf_stop()`, not per frame), and on every exit path of
+`subg_get_pkt()` including abort and timeout. The boot loopback also sleeps the
+radio when it finishes, so the register dump reports the idle state rather than
+whatever the last test left behind -- otherwise the invariant is unverifiable from
+the log.
+
+SPI still works with the part asleep, so the deferred frequency writes in
+`apply_pending_freq()` do not need it woken first.
+
+Verified on hardware: `OPMODE = 0x00` at idle, self-test `ALL PASSED`, and the pump
+answered **8/8 model reads at -53 to -54 dBm** afterwards -- so the saving costs
+nothing in reliability, which is unsurprising given legacy did the same thing.
+
+### 17.2 What already matched
+
+* **Wakeup sources.** LED heartbeat 30 ms every 10 s (legacy `LED_TIME1`/`LED_TIME4`),
+  battery sampling every 180 s (legacy `BAT_LOW_DET_INVL`), IPS timer tick every
+  60 s and only while connected (legacy `BLE_TMR_TICK_ONE_MIN`), advertising at
+  300 ms. The RFM69 retest work correctly stops once the radio answers rather than
+  polling forever.
+* **CPU idle.** Legacy ran `nrf_pwr_mgmt_run()` in its super-loop; here `main()`
+  returns and Zephyr's idle thread handles it, entering System ON sleep on WFI/WFE.
+  Equivalent in effect.
+* **Logging.** Legacy shipped with logging enabled -- `KIT_LOG_SUPORT` is defined in
+  `project/app/config/kit_config.h` -- so keeping it on is parity, not a deviation.
+
+### 17.3 Remaining gaps, not yet addressed
+
+Both are secondary to 17.1 and neither has been measured:
+
+* **UART console and UART log backend are enabled** (`CONFIG_UART_CONSOLE`,
+  `CONFIG_LOG_BACKEND_UART`) alongside the RTT backend. An initialised UARTE on
+  nRF52 is not free. Dropping the UART backend in favour of RTT alone would also
+  free D6/D7 (see the pin allocation note in the overlay).
+* **No `CONFIG_PM_DEVICE`**, so peripherals are never suspended. Notably the legacy
+  driver de-initialised the SPI bus between transfers while this port leaves it
+  bound to Zephyr permanently -- a deliberate deviation recorded in the overlay for
+  correctness reasons, but it has a power cost that has not been quantified.
+
+The honest next step for both is a current measurement rather than more reasoning
+from datasheets.
