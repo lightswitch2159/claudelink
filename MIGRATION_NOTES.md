@@ -1267,3 +1267,45 @@ displays a plausible value instead of nothing.
 
 FLASH 45.39% (196 KB of 442 KB), RAM 18.59% (48728 B of 256 KB) with both modules
 enabled. Both are behind Kconfig (`ORANGELINK_LED`, `ORANGELINK_BATTERY`).
+
+### 14.7 There is currently no flashing path except SWD
+
+Discovered while trying to recover from a failing debug probe. Worth writing down
+because it turns a loose jumper wire into a hard stop.
+
+`dts/orangelink-partitions.dtsi` deletes `partition@f4000`, and MCUboot occupies
+`0x00000000`-`0x0000C000`. On the XIAO, `0xf4000` is where the factory Adafruit UF2
+bootloader lives and `0x0` is where its MBR lives, so:
+
+* **UF2 / double-tap reset does not work.** The nRF52840 boots from `0x0`, which is
+  now MCUboot, so the Adafruit bootloader is never entered even if its bytes are
+  still physically present at `0xf4000` (our flashes only ever programmed `0x0` and
+  slot0, so they were never erased -- merely orphaned). The build still emits
+  `zephyr.uf2`; it is a dead artifact on this board.
+* **MCUboot serial recovery is not enabled** -- nothing in `sysbuild/mcuboot.conf`
+  turns it on.
+* **SMP / mcumgr is not in the application.** MIGRATION_NOTES 2.2 records the
+  intent that SMP-over-BLE replaces the legacy buttonless DFU service, but it has
+  not been implemented, so there is no over-the-air path either.
+
+So SWD is the only way to program this board, and restoring the UF2 bootloader
+would itself require SWD -- the recovery path depends on the thing that broke.
+
+**Recommended: implement the SMP-over-BLE DFU from 2.2.** It needs no pins, works
+over the link AndroidAPS already uses, and removes the single point of failure.
+MCUboot serial recovery over USB CDC is the alternative, but it needs a GPIO to
+enter recovery (D1 and D3 are free).
+
+### 14.8 Verifying firmware without a probe
+
+With SWD down, the Battery Service itself confirmed the flash had taken: reading
+characteristic `0x2A19` returned **26%**, where the pre-fix firmware returns a
+constant 100. 26% corresponds to ~3.75 V on the curve, consistent with the 3.78 V
+measured earlier less some runtime on the cell.
+
+One trap, recorded because it produced a confidently wrong answer first time:
+`BleakScanner.find_device_by_name("OrangePro")` resolved a **stale cached device**
+at `D1:A9:95:54:8E:38`, not the board at `E6:B5:4D:8C:C1:B9`, and that device
+reported 100%. A rescan showed only one `Orange*` device actually advertising.
+**Pin verification reads to an address, never a name** -- a name lookup can silently
+answer from a different device and the result looks perfectly plausible.
