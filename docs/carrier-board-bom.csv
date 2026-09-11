@@ -1,24 +1,27 @@
 Comment,Designator,Footprint,LCSC Part #,Qty,Notes
 RFM69HCW-915S2R,U1,RFM69HCW SMD module,C5189430,1,"Verify variant: bare ANT pad vs onboard IPEX"
-BQ24075RGTR,U2,VQFN-16 3x3,C15464,1,Charger + DPPM power path
+BQ24075RGTR,U2,VQFN-16 3x3,C15464,1,"Charger + DPPM power path. Thermal pad to VSS"
 DW01A,U3,SOT-23-6,C351410,1,1S protection controller
 FS8205A,Q1,SOT-23-6,C16052,1,Dual N-FET for DW01A
 AP2112K-3.3TRG1,U4,SOT-23-5,C51118,1,"3V3 LDO, 600 mA"
 TYPE-C 6P(073),J1,USB-C 6P SMD,C668623,1,"Power only: VBUS/GND/CC1/CC2"
 20279-001E-03,J2,u.FL / IPEX MHF1,C3173448,1,"Omit if U1 has its own IPEX"
 5.1k,"R1,R2",0603,,2,"CC1 and CC2 pull-downs, one each, NOT shared"
-1k,R3,0603,,1,"BQ24075 ISET ~890 mA -- VERIFY against datasheet"
-1.1k,R4,0603,,1,"BQ24075 ILIM ~1.4 A -- VERIFY against datasheet"
-TS bias,"R5,R6",0603,,2,"BQ24075 TS -- value per datasheet, or fit 10k NTC instead"
-100k,R7,0603,,1,"STAT pull-up to 3V3 (open drain) -> D3"
-330R,R8,0603,,1,DW01A VDD series
-2k,R9,0603,,1,DW01A CS series
-1M,"R10,R11",0603,,2,"Battery divider, cell side of protection FETs -> D1"
-10k,R12,0603,,1,RFM69 RESET pull-down
-100k,R13,0603,,1,LDO EN pull-up to SYS
-10uF,"C1,C4",0603 16V X5R,,2,"VBUS bulk, SYS bulk"
-10uF,C5,0603 16V X5R,,1,RFM69 local bulk for multi-second TX bursts
-1uF,"C2,C3,C6,C7",0603 16V X5R,,4,"Charger IN, BAT, LDO in, LDO out"
+1k,R3,0603,,1,"ISET -> 890 mA (KISET 890 AR typ). Range 590R-8.9k. Unconnected disables charging"
+1.1k,R4,0603,,1,"ILIM -> ~1.46 A (KILIM 1610 AR typ). Range 1.1k-8k. Unconnected disables ALL charging"
+10k,R5,0603,,1,"TS to VSS. Required when no NTC is fitted, per datasheet"
+100k,R6,0603,,1,"CHG open-drain pull-up to 3V3 -> D3. Datasheet range 1k-100k"
+330R,R7,0603,,1,DW01A VDD series
+2k,R8,0603,,1,DW01A CS series
+1M,"R9,R10",0603,,2,"Battery divider, cell side of protection FETs -> D1"
+10k,R11,0603,,1,RFM69 RESET pull-down
+100k,R12,0603,,1,LDO EN pull-up to SYS
+10uF,C1,0603 16V X5R,,1,VBUS bulk
+1uF,C2,0603 16V X5R,,1,"Charger IN bypass. Datasheet 1-10 uF"
+10uF,C3,0805 16V X5R,,1,"BAT bypass. Datasheet 4.7-47 uF -- NOT 1 uF"
+10uF,C4,0805 16V X5R,,1,"OUT/SYS bypass. Datasheet 4.7-47 uF"
+10uF,C5,0805 16V X5R,,1,RFM69 local bulk for multi-second TX bursts
+1uF,"C6,C7",0603 16V X5R,,2,"LDO in and out"
 100nF,"C8,C9,C10",0603 50V X7R,,3,"DW01A, RFM69, battery divider tap"
 TVS 6V unidir,D1,SOD-123,,1,"OPTIONAL VBUS clamp -- fit footprint, populate at discretion"
 Piezo buzzer,LS1,per part,,1,"Driven directly from D5 -- no FET, no flyback"

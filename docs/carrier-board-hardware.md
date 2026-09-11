@@ -97,6 +97,9 @@ re-check before ordering.
 | 3V3 LDO | AP2112K-3.3TRG1 | **C51118** | 600 mA, 250 mV dropout at full load, SOT-23-5 |
 | USB-C receptacle | SHOU HAN TYPE-C 6P(073) | **C668623** | 6-pin, power only: VBUS, GND, CC1, CC2. No data lines |
 | VBUS TVS | *optional*, any ~6 V unidirectional SOD-123 | -- | See the ESD note below; not required |
+
+`CHG` (pin 9) is the open-drain status output that becomes `charger_stat` -> D3.
+It is **not** `CE` (pin 4), which is an enable input -- see the strapping table.
 | u.FL / IPEX MHF1 | I-PEX 20279-001E-03 | **C3173448** | 50 ohm, DC-9 GHz |
 
 Still to pick, deliberately not asserted here because I did not verify them:
@@ -117,20 +120,49 @@ extra.
 * Standing drain about 2.1 uA. Do not be tempted by 100k/100k: 21 uA would be a
   large fraction of a board idle budget now in the tens of microamps.
 
-### BQ24075 programming
-Work these out against the datasheet rather than trusting the arithmetic here --
-I am recalling the constants, not reading them:
+### BQ24075 programming -- read from the datasheet (SLUS810N), not recalled
 
-* `ISET` sets fast-charge current as `I = K_ISET / R_ISET` with K_ISET around
-  890 A-ohm. For 0.5C on an 1800 mAh cell (900 mA) that is roughly **1 kohm**.
-* `ILIM` sets the input current limit similarly, K_ILIM around 1550 A-ohm.
-* **`TS` is the classic way to get a board that refuses to charge.** The thermistor
-  input must sit in a valid window or charging is inhibited. Either fit a 10k NTC
-  against the cell, or bias `TS` with fixed resistors per the datasheet's
-  disable procedure. Check this before you send the board.
-* `EN1`/`EN2` select the input-limit mode; set them per the datasheet table for
-  resistor-programmed `ILIM`, not left floating.
-* `SYSOFF` tied low for normal operation.
+**Static pin strapping.** All of these have internal pulls, and the datasheet says
+explicitly not to leave them floating:
+
+| Pin | # | Tie to | Why |
+|---|---|---|---|
+| `CE` | 4 | **VSS** | Charge Enable, **active low**. High disables charging. Internal 285k pull-down, but tie it anyway |
+| `EN1` | 6 | **VSS** | with EN2 high, selects resistor-programmed `ILIM` |
+| `EN2` | 5 | **3V3** | as above. Internal 285k pull-down |
+| `SYSOFF` | 15 | **VSS** | **Internally pulled *up* to VBAT via ~5 Mohm.** Left floating it disconnects the battery from the system |
+| `TMR` | 14 | float | default timers, `tMAXCHG` typ 18000 s = 5 h |
+| Thermal pad | -- | **VSS** | internally bonded to VSS; not the primary ground path |
+
+`EN1`/`EN2` per Table 7-2: `(EN2,EN1) = (1,0)` is resistor-programmed ILIM.
+`(0,0)` is USB100, `(0,1)` USB500, `(1,1)` standby. Logic levels are VIL 0.4 V max,
+VIH 1.4 V min, so tying EN2 to 3V3 is unambiguous. Startup is benign: until the LDO
+brings 3V3 up, EN2 reads low and the part sits in USB100 mode, then moves to ILIM.
+
+**Programming resistors:**
+
+| | Value | Gives | Allowed range |
+|---|---|---|---|
+| `ISET` (R3) | 1 kohm | `ICHG = KISET/RISET` = 890/1000 = **890 mA** | 590 ohm - 8.9 kohm |
+| `ILIM` (R4) | 1.1 kohm | `IINmax = KILIM/RILIM` = 1610/1100 = **~1.46 A** | 1.1 kohm - 8 kohm |
+| `TS` (R5) | 10 kohm to VSS | valid TS level with no NTC fitted | -- |
+
+K factors typical: `KISET` 890 A-ohm (797-975), `KILIM` 1610 A-ohm (1500-1720).
+
+**Leaving `ISET` unconnected disables charging; leaving `ILIM` unconnected disables
+all charging.** Two separate ways to get a dead board from an unpopulated resistor.
+
+**`TS` is the classic silent failure.** The datasheet is explicit: for applications
+not using the TS function, connect a **single 10 kohm fixed resistor from TS to
+VSS**. Fit a 10k NTC against the cell instead if you want real thermal protection.
+
+**Timers are fine at default.** `tMAXCHG` with `TMR` floating is typically 5 hours
+(4-6 h). Charging 1800 mAh at 890 mA takes roughly 3 h including taper, so there is
+comfortable margin and `TMR` needs no part.
+
+**Decoupling, from the pin table:** `IN` 1-10 uF, `BAT` **4.7-47 uF**, `OUT`
+4.7-47 uF. Note `BAT` -- an earlier draft of this BOM had 1 uF there, which is below
+the specified minimum.
 
 ### USB-C
 Using the 6-pin **C668623** rather than a 16-pin part. It carries VBUS, GND, CC1
