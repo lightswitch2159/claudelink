@@ -95,8 +95,8 @@ re-check before ordering.
 | Protection IC | DW01A | **C351410** | SOT-23-6 |
 | Protection FETs | FS8205A | **C16052** | SOT-23-6, pairs with DW01A |
 | 3V3 LDO | AP2112K-3.3TRG1 | **C51118** | 600 mA, 250 mV dropout at full load, SOT-23-5 |
-| USB-C receptacle | TYPE-C-31-M-12 | **C165948** | 16-pin, power-oriented, very widely used |
-| USB ESD | USBLC6-2SC6 | **C7519** | ST original; HXY equivalent is C5261088 |
+| USB-C receptacle | SHOU HAN TYPE-C 6P(073) | **C668623** | 6-pin, power only: VBUS, GND, CC1, CC2. No data lines |
+| VBUS TVS | *optional*, any ~6 V unidirectional SOD-123 | -- | See the ESD note below; not required |
 | u.FL / IPEX MHF1 | I-PEX 20279-001E-03 | **C3173448** | 50 ohm, DC-9 GHz |
 | Buzzer FET | AO3400A | **C20917** | logic-level N-ch, JLC Basic. Only needed for a magnetic buzzer; a piezo can be driven from D5 directly |
 
@@ -134,8 +134,39 @@ I am recalling the constants, not reading them:
 * `SYSOFF` tied low for normal operation.
 
 ### USB-C
+Using the 6-pin **C668623** rather than a 16-pin part. It carries VBUS, GND, CC1
+and CC2 only -- no D+/D-, no SBU.
+
 * **5.1 kohm from CC1 to GND and 5.1 kohm from CC2 to GND**, separately -- not one
   resistor shared between them. Without these a USB-C source supplies nothing.
+  This does not change with the 6-pin connector.
+* **Check the mechanical retention.** A 6-pin part has fewer anchors than a 16-pin
+  one, and this is a charging port that gets plugged and unplugged repeatedly.
+  Confirm the 073 series' board-lock tabs are in your footprint and that the pads
+  are generous. LCSC USB-C footprints are a known source of trouble -- worth
+  checking against a community footprint library rather than trusting the
+  datasheet drawing alone.
+
+### ESD: why the USBLC6 came out
+Dropping the dedicated ESD array is justified here, but not because the connector
+protects anything. Two separate reasons:
+
+1. **The lines it existed to protect are gone.** USBLC6-2SC6 is a two-channel
+   array for D+/D- plus a VBUS clamp. With a power-only connector, two of its
+   three jobs do not exist.
+2. **CC1/CC2 terminate in nothing but resistors.** They go to a 5.1 kohm pull-down
+   each and nowhere else -- there is no CC decoder, no IC pin on that net. A strike
+   there has nothing to damage. *This is the part that would change* if a CC
+   decoder were ever added for higher-current negotiation: CC would then reach a
+   silicon input and would want protection.
+
+What remains exposed is **VBUS**, and that goes somewhere sensitive. It is covered
+reasonably well already: the BQ24075 is rated to 28 V on `IN` with overvoltage
+protection, and the input bulk capacitance absorbs the low-energy part of a strike.
+
+A ~6 V unidirectional TVS on VBUS to ground is therefore **optional** -- a few cents
+of insurance on the one line that matters, not a correctness requirement. Fit the
+footprint and decide at assembly if you want the option.
 * Note that nothing here reads the CC lines, so the board cannot legitimately
   negotiate above the default. The BQ24075's DPPM handles this gracefully: if the
   source cannot deliver, VIN droops and it reduces charge current rather than
@@ -151,9 +182,9 @@ enough that there is no reason to tap `SYS`.
 ## 5. Power architecture
 
 ```
-USB-C ──► ESD ──► BQ24075 ──► SYS ──► AP2112K-3.3 ──► 3V3 ──┬──► XIAO 3V3 pad
-           │         │                                       ├──► RFM69HCW
-          CC 5k1    ISET/ILIM                                └──► buzzer
+USB-C ──► BQ24075 ──► SYS ──► AP2112K-3.3 ──► 3V3 ──┬──► XIAO 3V3 pad
+   │         │                                       ├──► RFM69HCW
+  CC 5k1    ISET/ILIM                                └──► buzzer
                      │
                      └──► BAT ──► DW01A + FS8205A ──► cell ──► 1M/1M ──► XIAO D1
 ```
@@ -168,7 +199,7 @@ not the binding constraint. Swap to a buck-boost only if that changes.
 Roughly by how expensive the mistake is:
 
 1. `5V` pad unconnected, `B+`/`B-` unconnected.
-2. CC resistors, both of them, 5.1k to ground.
+2. CC resistors, both of them, 5.1k to ground, one per line.
 3. `TS` biased so the charger will actually charge.
 4. Divider on the cell side of the protection FETs, with its 100 nF.
 5. u.FL keep-out honoured, 50 ohm feed, ground plane continuous beneath it.

@@ -83,9 +83,12 @@ two stay in step:
 > module's underside `B+` and `B-` battery pads to the carrier's battery net.
 >
 > ### Power and charging — the core requirement
-> * USB-C receptacle, sink only, for charging and 5 V input. Include **5.1 kΩ
->   pull-downs on both CC1 and CC2** so a USB-C source will actually supply
->   current. Add ESD protection on the data/CC lines and VBUS.
+> * USB-C receptacle, sink only, for charging and 5 V input. A **6-pin power-only
+>   part is sufficient** (VBUS, GND, CC1, CC2) -- no USB data is needed anywhere on
+>   this board. Include **5.1 kΩ pull-downs on both CC1 and CC2**, one per line, so
+>   a USB-C source will actually supply current. A dedicated USB ESD array is not
+>   needed with no data lines and CC terminating only in resistors; an optional
+>   TVS on VBUS is reasonable insurance.
 > * A 1S LiPo charger IC with **programmable charge current set by resistor,
 >   defaulted to approximately 900 mA** (0.5C for the 1800 mAh cell). Please use a
 >   part with **integrated power path** so the board runs from USB while the cell
