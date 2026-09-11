@@ -1375,3 +1375,85 @@ wireless upgrades are possible, and at time of writing the probe is down
 (`Unexpected ACK '0'` on 8 consecutive attempts), so it is committed but not
 deployed. The board is still running the previous image -- which does have the
 calibration and Battery Service fixes, confirmed by reading 0x2A19 = 26%.
+
+## 15. SWD died, and why it was two faults stacked
+
+Flashing went from "works" to "one attempt in ten" to "never". It turned out to be
+two independent problems, and treating them as one wasted several rounds.
+
+### 15.1 Reading the failure signatures
+
+pyOCD's error text distinguishes them precisely, once you stop treating every
+failure as "the probe is broken":
+
+| Signature | Layer | Meaning |
+|---|---|---|
+| `No ACK` | physical | Nothing is driving the bus. Bad joint, wrong pin, no GND. |
+| `Unexpected ACK 'n'` | physical | Bus is driven but the framing is garbled. Marginal joint. |
+| `FAULT ACK` reading AP#0 IDR | protocol | **Link is fine.** The DP answered; the AHB-AP is disabled. |
+| `SoCTarget has no selected core` | protocol | Follows the above -- no core reachable behind a disabled AP. |
+
+**Clock rate is the discriminator.** Signal-integrity faults improve as the clock
+drops; 18 attempts across 6 rates from default down to 50 kHz gave *identical*
+results, which ruled signal integrity out for that round. Later, after rewiring,
+50 kHz produced a clean `FAULT ACK` -- a different fault entirely.
+
+A tally beats a single attempt. Six runs at 50 kHz gave 4x `No ACK` and 2x
+`FAULT ACK`, which is what "two faults stacked" looks like: the physical layer is
+intermittent, and when it does come up, APPROTECT is waiting behind it.
+
+### 15.2 APPROTECT re-arms itself every boot
+
+`CONFIG_NRF_APPROTECT_DISABLE` is **not selectable on nRF52840** -- it `depends on
+SOC_NRF54L_CPUAPP_COMMON`. For nRF52 the only sensible handling is
+`NRF_APPROTECT_USE_UICR` (ours), and `system_nrf52_approtect.h` does this at every
+boot:
+
+```c
+/* Load APPROTECT soft branch from UICR.
+   If UICR->APPROTECT is disabled, POWER->APPROTECT will be disabled. */
+NRF_APPROTECT->DISABLE = NRF_UICR->APPROTECT;
+```
+
+On an erased chip `UICR->APPROTECT` is `0xFFFFFFFF`, whose low byte is not the
+magic `0x5A`, so **the access port is re-protected as soon as our firmware runs.**
+That leaves only the window between reset and `SystemInit`, which is exactly why
+one flash in ten succeeded and the rest reported `FAULT ACK`. It was never
+random.
+
+The permanent fix is `UICR->APPROTECT = 0xFFFFFF5A` at `0x10001208`:
+
+* `UICR_APPROTECT_PALL` is bits[7:0] (`HwDisabled = 0x5A`), and
+  `APPROTECT_DISABLE_DISABLE` is *also* bits[7:0], so the upper bits are ignored.
+* `0xFFFFFF5A` only *clears* bits, which is all flash can do to an erased word.
+* UICR survives ordinary flashing. Only a mass erase reverts it.
+
+pyOCD can write it because its nRF52840 target maps UICR as a flash region
+(`start=0x10001000, length=0x400`). `tools/uicr-approtect-hwdisabled.hex` is that
+one word, and `tools/recover-swd.sh` programs it.
+
+**The catch:** APPROTECT disables the AHB-AP, which is the same port a UICR write
+needs -- so the write itself must win the post-reset race. It is far likelier to
+than a flash was, being 4 bytes against 190 KB, and wiring nRESET (Pico GP1)
+removes the race entirely via `--connect under-reset`. Failing that, CTRL-AP mass
+erase stays reachable while the AHB-AP is disabled, but it is destructive.
+
+### 15.3 pyocd commander exits 0 on a fatal error
+
+Two successive versions of the recovery script reported a healthy link on a board
+that could not be flashed at all, because both gated on exit status:
+
+```
+$ pyocd commander -t nrf52840 -c "read32 0x10000000"
+Error while initing target: SWD/JTAG communication failure (Unexpected ACK '0')
+$ echo $?
+0
+```
+
+`pyocd flash` sets a correct exit code; **`pyocd commander` does not.** The script
+now gates on the output containing the expected value *and* containing no error
+text.
+
+**Lesson, and it is the same one as 14.9 and 13.5: verify the effect, not the
+return code.** An exit status, a build succeeding, and a Kconfig assignment are all
+claims about what was attempted, not evidence of what happened.
