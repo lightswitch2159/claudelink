@@ -98,10 +98,9 @@ re-check before ordering.
 | USB-C receptacle | SHOU HAN TYPE-C 6P(073) | **C668623** | 6-pin, power only: VBUS, GND, CC1, CC2. No data lines |
 | VBUS TVS | *optional*, any ~6 V unidirectional SOD-123 | -- | See the ESD note below; not required |
 | u.FL / IPEX MHF1 | I-PEX 20279-001E-03 | **C3173448** | 50 ohm, DC-9 GHz |
-| Buzzer FET | AO3400A | **C20917** | logic-level N-ch, JLC Basic. Only needed for a magnetic buzzer; a piezo can be driven from D5 directly |
 
 Still to pick, deliberately not asserted here because I did not verify them:
-a 2-pin JST-PH 2.0 battery connector, the buzzer itself, and 0603 passives. All
+a 2-pin JST-PH 2.0 battery connector, the piezo element, and 0603 passives. All
 are trivially available; take them from JLC's Basic library so they cost nothing
 extra.
 
@@ -172,19 +171,28 @@ footprint and decide at assembly if you want the option.
   source cannot deliver, VIN droops and it reduces charge current rather than
   collapsing. Add a CC decoder only if you want guaranteed high-current charging.
 
-### Buzzer
-A piezo element can be driven straight from D5. A magnetic buzzer needs current the
-GPIO cannot supply, so use the AO3400A low-side with a ~100 ohm gate resistor, a
-**10 kohm gate-to-source pull-down** so it cannot sound while the nRF is in reset,
-and a flyback diode across the coil. Either way it runs from 3V3; the load is small
-enough that there is no reason to tap `SYS`.
+### Buzzer -- piezo, driven directly
+A **piezo** element goes straight across D5 and GND. It is capacitive, draws
+essentially no current, and needs no driver at all: no FET, no gate resistor, no
+gate pull-down, no flyback diode. That removes four lines from the BOM and the last
+transistor from the board.
+
+A magnetic buzzer would need a low-side FET because the GPIO can only source around
+15 mA against the 30-90 mA such a buzzer wants. That is the option being declined
+here; if loudness later proves insufficient, that is the change to make.
+
+**Optional, louder, free:** driving the piezo differentially between D5 and D7 in
+anti-phase doubles the swing to roughly 6.6 V peak-to-peak, worth about 6 dB, and
+D7 is otherwise spare. It costs a second PWM channel in firmware, which does not
+exist yet, so treat it as a footprint option rather than a plan -- route both legs
+and decide later.
 
 ## 5. Power architecture
 
 ```
 USB-C ──► BQ24075 ──► SYS ──► AP2112K-3.3 ──► 3V3 ──┬──► XIAO 3V3 pad
-   │         │                                       ├──► RFM69HCW
-  CC 5k1    ISET/ILIM                                └──► buzzer
+   │         │                                       └──► RFM69HCW
+  CC 5k1    ISET/ILIM
                      │
                      └──► BAT ──► DW01A + FS8205A ──► cell ──► 1M/1M ──► XIAO D1
 ```

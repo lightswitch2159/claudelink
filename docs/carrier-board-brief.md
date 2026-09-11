@@ -104,7 +104,7 @@ two stay in step:
 >
 > * **System rail and regulation.** Take the charger's power-path output as a
 >   `SYS` rail, and regulate it to 3.3 V with a low-dropout LDO sized for at least
->   250 mA continuous. This rail supplies the XIAO, the RFM69HCW and the buzzer. Prefer an LDO
+>   250 mA continuous. This rail supplies the XIAO and the RFM69HCW. Prefer an LDO
 >   over a switching regulator here: the RFM69HCW is a 916 MHz receiver and
 >   switching noise is the greater risk, while runtime is not a constraint with an
 >   1800 mAh cell. If you believe a buck-boost is justified to recover the bottom
@@ -182,8 +182,9 @@ the stackup, dielectric and the calculated trace width in the design notes.
 > * RESET may be tied to its inactive state; the firmware never asserts it.
 >
 > ### Other I/O
-> * **Buzzer** on D5 (P0.05): magnetic buzzer with a driver transistor, or a
->   piezo driven directly if that keeps it simpler.
+> * **Piezo buzzer** on D5 (P0.05), driven straight from the GPIO. A piezo is
+>   capacitive and needs no driver transistor, flyback diode or gate pull-down.
+>   Do not substitute a magnetic buzzer, which would need all three.
 > * D1 (P0.03) and D3 (P0.29) are taken by battery sense and charger status above.
 >   Leave D4 (P0.04), D6 (P1.11) and D7 (P1.12) unassigned, brought out to a
 >   0.1 inch expansion header with 3V3 and GND. D4 is analog capable (AIN2), so
@@ -226,5 +227,5 @@ Automated tools get these wrong often enough to be worth a checklist:
    than asserted, continuous ground directly under the whole run, no stub branch
    to an unpopulated SMA, u.FL keep-out respected on every layer, and the RF
    section not routed under or beside the switcher.
-7. **If a magnetic buzzer is fitted**, flyback diode across the coil and the
-   MOSFET gate pulled down so it cannot sound during reset.
+7. **Piezo, not magnetic, on D5** -- a magnetic buzzer silently exceeds what the
+   GPIO can source and would need a FET the BOM no longer carries.
