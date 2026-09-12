@@ -1,0 +1,105 @@
+/*
+ * Orangelink on the Adafruit Feather nRF52832 (product 3406) + RFM69HCW FeatherWing.
+ * SPDX-License-Identifier: GPL-2.0-only
+ *
+ * The FeatherWing carries the same SX1231 as the XIAO build, so the whole
+ * src/drivers/rf69 and OOK datapath ports unchanged -- that is the reason this
+ * board was chosen over an SX1262 part, which cannot do OOK at all.
+ *
+ * WIRING REQUIRED on the FeatherWing (its CS/IRQ/RST pads are solder-jumpers):
+ *
+ *   RFM69 signal   Feather pin   nRF52832   note
+ *   SCK            SCK           P0.12      hardware SPI, no jumper needed
+ *   MOSI           MOSI          P0.13      "
+ *   MISO           MISO          P0.14      "
+ *   CS   (NSS)     P0.11         P0.11      jumper CS here
+ *   DIO1           P0.07         P0.07      SOLDER A WIRE -- see below
+ *   RST            -             -          unused; the driver never asserts it
+ *
+ * DIO1 is not optional. The receive path waits on FifoNotEmpty via DIO1; the
+ * FeatherWing only brings DIO0 out to IRQ by default, and DIO0's PayloadReady is
+ * useless under our variable-length framing. Without DIO1 the driver falls back
+ * to SPI polling, which is what made the legacy firmware block for seconds.
+ *
+ * Pins avoided and why: P0.17/P0.19 are the onboard LEDs, P0.20 is the DFU
+ * button, P0.06/P0.08 are UART, P0.25/P0.26 are I2C, P0.31 is the VBAT divider.
+ */
+
+/ {
+	aliases {
+		/*
+		 * This board has only two LEDs -- red P0.17 and blue P0.19. There is no
+		 * green, so the battery indicator's "green" is BLUE here and "yellow" is
+		 * red+blue (magenta). Deliberate and documented rather than silently
+		 * wrong; the three states remain distinguishable at a glance.
+		 */
+		orangelink-led-r = &led0;   /* red  */
+		orangelink-led-g = &led1;   /* blue, standing in for green */
+		orangelink-led-b = &led1;
+	};
+
+	/* Battery sense. The Feather divides VBAT onto A7 = P0.31 = AIN7. */
+	zephyr,user {
+		io-channels = <&adc 7>;
+	};
+
+	/*
+	 * Note there is deliberately no vbat_enable and no chg_current node. Those
+	 * are XIAO-specific; this board's divider is always connected and its charger
+	 * current is fixed in hardware. src/battery/battery.c treats both as optional.
+	 */
+};
+
+&adc {
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	channel@7 {
+		reg = <7>;
+		/* Feather divider is 100k/100k, so VBAT/2 -- a 4.2 V cell presents
+		 * 2.1 V, which needs the 3.6 V scale. Gain 1/4 (2.4 V) would clip.
+		 */
+		zephyr,gain = "ADC_GAIN_1_6";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,input-positive = <NRF_SAADC_AIN7>;
+		zephyr,resolution = <12>;
+		zephyr,oversampling = <4>;
+	};
+};
+
+&pinctrl {
+	spi1_default: spi1_default {
+		group1 {
+			psels = <NRF_PSEL(SPIM_SCK, 0, 12)>,
+				<NRF_PSEL(SPIM_MOSI, 0, 13)>,
+				<NRF_PSEL(SPIM_MISO, 0, 14)>;
+		};
+	};
+
+	spi1_sleep: spi1_sleep {
+		group1 {
+			psels = <NRF_PSEL(SPIM_SCK, 0, 12)>,
+				<NRF_PSEL(SPIM_MOSI, 0, 13)>,
+				<NRF_PSEL(SPIM_MISO, 0, 14)>;
+			low-power-enable;
+		};
+	};
+};
+
+&spi1 {
+	status = "okay";
+	pinctrl-0 = <&spi1_default>;
+	pinctrl-1 = <&spi1_sleep>;
+	pinctrl-names = "default", "sleep";
+	cs-gpios = <&gpio0 11 GPIO_ACTIVE_LOW>;      /* P0.11 -> RFM69 NSS */
+
+	rf69: rf69@0 {
+		compatible = "orangelink,rfm69";
+		reg = <0>;
+		spi-max-frequency = <4000000>;
+		band = "916";
+		dio1-gpios = <&gpio0 7 GPIO_ACTIVE_HIGH>;   /* P0.07 -> RFM69 DIO1 */
+	};
+};

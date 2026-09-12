@@ -38,15 +38,21 @@ static const struct adc_dt_spec vbatt =
  * current -- about 2.8 uA at 4.2 V through ~1.5 Mohm -- which is far below the
  * radio and BLE idle budget.
  */
+#if DT_NODE_EXISTS(DT_NODELABEL(vbat_enable))
 static const struct gpio_dt_spec vbatt_enable =
 	GPIO_DT_SPEC_GET(DT_NODELABEL(vbat_enable), gpios);
+#define HAS_VBAT_ENABLE 1
+#endif
 
 /*
  * Charger current select, P0.13. See the overlay for the polarity rationale.
  * Driven once at init; the charger is hardware and needs no further attention.
  */
+#if DT_NODE_EXISTS(DT_NODELABEL(chg_current))
 static const struct gpio_dt_spec chg_current =
 	GPIO_DT_SPEC_GET(DT_NODELABEL(chg_current), gpios);
+#define HAS_CHG_CURRENT 1
+#endif
 
 static uint16_t last_mv;
 static uint8_t last_percent = BATTERY_UNKNOWN_PERCENT;
@@ -277,19 +283,23 @@ int battery_init(void)
 		return err;
 	}
 
+#if defined(HAS_VBAT_ENABLE)
 	if (!gpio_is_ready_dt(&vbatt_enable)) {
 		LOG_ERR("VBAT enable GPIO not ready");
 		return -ENODEV;
 	}
+#endif
 
+#if defined(HAS_VBAT_ENABLE)
 	/* ACTIVE_LOW in devicetree, so "active" drives the pin low -- see the
-	 * hazard note above.
+	 * hazard note above. Boards without a sense-enable pin simply omit the node.
 	 */
 	err = gpio_pin_configure_dt(&vbatt_enable, GPIO_OUTPUT_ACTIVE);
 	if (err) {
 		LOG_ERR("VBAT enable configure failed (%d)", err);
 		return err;
 	}
+#endif
 
 	/*
 	 * Charge current. ACTIVE_LOW in devicetree, so OUTPUT_ACTIVE drives P0.13
@@ -297,6 +307,7 @@ int battery_init(void)
 	 * A failure here is not fatal -- it only means the charger stays on its
 	 * default rate.
 	 */
+#if defined(HAS_CHG_CURRENT)
 	if (gpio_is_ready_dt(&chg_current)) {
 		int cerr = gpio_pin_configure_dt(&chg_current,
 			IS_ENABLED(CONFIG_ORANGELINK_BATTERY_FAST_CHARGE)
@@ -312,6 +323,9 @@ int battery_init(void)
 	} else {
 		LOG_WRN("charge current GPIO not ready");
 	}
+#else
+	/* No charge-current select on this board; the charger runs at its default. */
+#endif
 
 	/* The divider needs a moment to settle before the first conversion. */
 	k_sleep(K_MSEC(5));

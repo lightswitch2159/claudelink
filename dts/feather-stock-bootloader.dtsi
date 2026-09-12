@@ -1,0 +1,81 @@
+/*
+ * Partition layout for the Adafruit Feather nRF52832 (3406) running its STOCK
+ * Adafruit nRF52 bootloader. SPDX-License-Identifier: GPL-2.0-only
+ *
+ * Zephyr ships UF2 layouts for the nRF52840 only (nrf52840_partition_uf2_sdv*),
+ * and the nrf52_adafruit_feather board defines an MCUboot layout instead, so this
+ * has to be written by hand.
+ *
+ * Note this board is NOT UF2: the nRF52832 has no USB peripheral, so it reaches
+ * USB through a CP2104 bridge and cannot enumerate as mass storage. Updates go by
+ * serial DFU (adafruit-nrfutil) or Adafruit BLE OTA.
+ *
+ * The deliberate trade (see MIGRATION_NOTES): keeping the stock bootloader keeps
+ * serial DFU and Adafruit BLE OTA -- a recovery path that survives a bad flash --
+ * at the cost of MCUboot's signed dual-slot images,
+ * automatic rollback, and the mcumgr/SMP DFU. On a bench unit that is constantly
+ * rewired, recovery was judged worth more than rollback. The UF2 bootloader on
+ * the XIAO was lost exactly this way and could not be restored without SWD.
+ *
+ * Layout follows Adafruit's nRF52832 map with SoftDevice S132 6.x:
+ *
+ *   0x00000  0x01000   MBR                       (bootloader owns it)
+ *   0x01000  0x25000   SoftDevice region         reserved, unused by Zephyr
+ *   0x26000  0x4C000   Application               <- we link here, 304 KB
+ *   0x72000  0x02000   settings storage (NVS)    two pages, the NVS minimum
+ *   0x74000  0x0A000   Adafruit bootloader       read-only
+ *   0x7E000  0x01000   MBR parameters            BOOTLOADER OWNS THIS
+ *   0x7F000  0x01000   bootloader settings       BOOTLOADER OWNS THIS
+ *
+ * Storage is carved out of the application region on purpose. The obvious spot --
+ * 0x7E000 -- is the bootloader's MBR-parameter page, and putting NVS there would
+ * corrupt the bootloader's own state the first time a setting was written.
+ *
+ * !! VERIFY BEFORE FLASHING !! The application start depends on the SoftDevice
+ * version the bootloader was built against. 0x26000 is right for S132 6.x; older
+ * bootloaders differ. Read it from the board's own bootloader release notes, or
+ * dump flash and look for where the bootloader expects the app vector table. A
+ * wrong offset produces a board that flashes cleanly and then does nothing.
+ *
+ * The SoftDevice region is reserved rather than reclaimed. Zephyr uses its own
+ * controller and does not need a SoftDevice, but the bootloader may still probe
+ * that area, and 312 KB is already ample -- the app measures ~174 KB.
+ */
+
+/ {
+	chosen {
+		zephyr,code-partition = &app_partition;
+	};
+};
+
+&flash0 {
+	partitions {
+		/delete-node/ partition@0;
+		/delete-node/ partition@c000;
+		/delete-node/ partition@3e000;
+		/delete-node/ partition@70000;
+		/delete-node/ partition@7a000;
+
+		softdevice_partition: partition@1000 {
+			label = "softdevice";
+			read-only;
+			reg = <0x00001000 0x00025000>;
+		};
+
+		app_partition: partition@26000 {
+			label = "image-0";
+			reg = <0x00026000 0x0004C000>;   /* 304 KB */
+		};
+
+		storage_partition: partition@72000 {
+			label = "storage";
+			reg = <0x00072000 0x00002000>;   /* 8 KB, two NVS pages */
+		};
+
+		boot_partition: partition@74000 {
+			label = "adafruit-bootloader";
+			read-only;
+			reg = <0x00074000 0x0000A000>;
+		};
+	};
+};
