@@ -1968,3 +1968,61 @@ where it becomes free and pin-less.
 
 Note that neither datasheet mentions a charger, so charging hardware is a
 board-level problem on the RAK4600 regardless of which option is chosen.
+
+## 20. Which Semtech parts can carry this link
+
+The requirement is narrow and unforgiving: **OOK, at ~916 MHz**. Medtronic pumps use
+on-off keying, and this port depends on it
+(`RF_DATAMODUL_MODULATIONTYPE_OOK` in the 916 config table).
+
+OOK support below was checked against the Semtech reference drivers in-tree; the
+frequency ranges are datasheet figures and worth confirming per part.
+
+### Will work
+
+| Part | Modulation | Range | Notes |
+|---|---|---|---|
+| **SX1231 / SX1231H** | FSK/OOK | 290-1020 MHz | what this project uses -- RFM69W / RFM69HCW |
+| SX1232 / SX1233 | FSK/OOK | 290-1020 MHz | same family, harder to source |
+| SX1238 | FSK/OOK | 290-1020 MHz | harder to source |
+| **SX1272 / SX1273** | LoRa + FSK/OOK | 860-1020 MHz | OOK confirmed in-tree |
+| **SX1276 / SX1277 / SX1279** | LoRa + FSK/OOK | 137-1020 MHz | OOK confirmed in-tree -- RFM95W |
+
+### Will not work
+
+| Part | Why |
+|---|---|
+| SX1261 / SX1262 / SX1268 | GFSK + LoRa only. `PACKET_TYPE_GFSK`/`PACKET_TYPE_LORA`, no OOK |
+| LR1110 / LR1120 | no OOK |
+| SX1280 / SX1281 | 2.4 GHz -- wrong band entirely |
+| SX1211 / SX1212 | 300-510 MHz -- does not reach 916 |
+| **SX1278** | **trap:** same die family as SX1276 but the low-band part (137-525 MHz). RFM98 is SX1278 and is 433-only |
+
+### Two traps worth naming
+
+**Band-specific matching.** The die being wideband does not make the *module*
+wideband. This was demonstrated directly in section 18: a 433 MHz RFM69 borrowed to
+test the SPI link reported `VERSION = 0x24` and passed every digital self-test,
+while being useless on air at 916. Pick the 868/915 module variant, not just the
+right die.
+
+**SX1276 vs SX1278.** Identical family, and the part numbers differ by one digit,
+but SX1278 tops out around 525 MHz. For 916 MHz the module to look for is **RFM95W**.
+
+### Effort, if moving to SX127x
+
+Less than it looks. Comparing register namespaces:
+
+```
+SX1231 (ours)          84 registers
+SX1276 FSK/OOK         77 registers
+shared names           54
+```
+
+`AFCBW, BITRATEMSB/LSB, DIOMAPPING1/2, FIFO, FIFOTHRESH, FRFMSB/MID/LSB,
+IRQFLAGS1/2, LNA, OCP, ...` all carry over. Of the 30 SX1231-only registers, 16 are
+`AESKEY1..16` and the rest are mostly `AUTOMODES` -- none of which this project
+uses. So an SX127x port is closer to a translation of `rf69.c` than a design from
+scratch, though the OOK demodulator has real controls the SX1231 lacks
+(`REG_OOKPEAK`, `REG_OOKFIX`, `REG_OOKAVG`, OOK bit-sync) which need tuning against
+a pump rather than assuming.
