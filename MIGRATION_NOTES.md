@@ -1927,3 +1927,44 @@ per slot in a dual-slot layout, and 95% of a single 184 KB slot with OTA given u
 
 **Confirm QFAA before buying anything.** Everything else here is tractable work;
 this one is binary.
+
+### 19.7 Battery sensing without an analog pin
+
+19.5 left battery measurement as the awkward part: only AIN1 (P0.03) is both
+exposed and analog-capable, and it is the configured MCU reset pin. Three ways out,
+one of which removes the constraint entirely.
+
+**A. Use AIN1 and give up hardware reset.** Cheapest in parts and code -- change the
+channel and the divider ratio and the existing module works unchanged.
+`UICR.PSELRESET` is re-assignable, and reset is still available over SWD, from
+software, and implicitly through the BLE DFU path. Note P0.03 would need an
+*external* divider: a 4.2 V cell exceeds the pin's absolute maximum, and unlike the
+XIAO there is no onboard one.
+
+**B. I2C fuel gauge -- recommended.** P0.12/P0.13 are exposed and otherwise idle, so
+this sidesteps the analog constraint completely and keeps the reset pin. Zephyr
+already ships the subsystem and suitable 1S LiPo parts (`max17048`, `lc709203f`).
+Measured cost of adding `CONFIG_FUEL_GAUGE` + MAX17048:
+
+| | FLASH | of slot | RAM |
+|---|---|---|---|
+| baseline | 179104 B | 82.6% | 51596 B |
+| + MAX17048 | 182644 B | 84.2% | 51724 B |
+| **cost** | **+3540 B** | +1.6pp | **+128 B** |
+
+Affordable, and some of it comes back by deleting the ADC path -- the divider
+arithmetic, the `lipo_curve` table and the calibration logging (`battery.c` is
+1674 B today). It is also *better data*: a real state-of-charge algorithm instead of
+the open-circuit voltage curve this port uses, which its own comments concede "is
+not a fuel gauge" and which reads low under a transmit burst. The cost is one more
+IC on the board.
+
+**C. Measure VDD with no pin at all.** `NRF_SAADC_VDD` exists, and the SAADC can
+sample the supply rail directly. But the module is specified 2.0-3.6 V while a 1S
+LiPo is 3.0-4.2 V, so a regulator is required -- and then VDD is constant and says
+nothing about the cell until it reaches dropout. Only worth considering if the
+chemistry changes to something that stays under 3.6 V (2xAA, or a 3 V coin cell),
+where it becomes free and pin-less.
+
+Note that neither datasheet mentions a charger, so charging hardware is a
+board-level problem on the RAK4600 regardless of which option is chosen.
