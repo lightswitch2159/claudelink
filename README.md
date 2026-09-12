@@ -3,9 +3,12 @@
 A fork of [birdfly/Orangelink-Firmware](https://github.com/birdfly/Orangelink-Firmware)
 being migrated from the legacy nRF5 SDK to the nRF Connect SDK (Zephyr).
 
-Orangelink is a sub-GHz ↔ BLE bridge that speaks the RileyLink-compatible
-`subg_rfspy` protocol to insulin pumps (Medtronic Minimed 722, Omnipod) over an
-external RFM69 radio.
+A sub-GHz ↔ BLE bridge that speaks the RileyLink-compatible `subg_rfspy` protocol
+to a **Medtronic Minimed pump at 916 MHz** over an external RFM69 radio.
+
+Scope is 916 MHz Minimed only. The original firmware also drove a second radio at
+433 MHz and an 868 MHz band; neither is fitted or supported here, and the
+corresponding code paths were deliberately not ported.
 
 ---
 
@@ -21,25 +24,20 @@ external RFM69 radio.
 
 ---
 
-## Status: Phase 0 complete. No code has been ported. Nothing builds yet.
+## Status: working and verified against a real pump
 
-Phase 0 was a feasibility gate, and **it did not pass as specified**. Read
-[`docs/FEASIBILITY_REPORT.md`](docs/FEASIBILITY_REPORT.md) before doing anything
-else.
-
-Headline findings:
+Ported from the legacy nRF5 SDK to **nRF Connect SDK v3.4.0 / Zephyr 4.4.0**, running
+on a **Seeed XIAO nRF52840** with an RFM69HCW at 916 MHz.
 
 | | |
 |---|---|
-| **nRF52810 cannot host this port** | The NCS platform baseline (~133 KB) exceeds the *entire* current shipping image (131.4 KB). Adding MCUboot overflows 192 KB. |
-| **The scoping document's flash map was wrong by 72 KB** | S112 is **96 KB**, not ~25 KB. The application region is **52 KB**, not ~124 KB. |
-| **The bare-metal option does not exist for nRF52** | NCS Bare Metal is a separate SDK supporting **nRF54L Series only**. |
-| **Three remotely reachable buffer overflows in the shipping firmware** | Unauthenticated, no pairing required. Affects deployed devices today. |
-| **Recommended chip** | nRF52832 — but compare against nRF54L first, since hardware is changing anyway. |
+| **Pump comms** | Verified against a real Minimed 722. AndroidAPS reads model, settings and history. A byte-identical replay of the AAPS command sequence gets a reply every attempt at −40 to −54 dBm. |
+| **RF self-test** | Passes: `VERSION = 0x24`, FIFO and 4b6b datapath, DIO1 interrupt, TX completion. |
+| **Power** | Radio sleeps between operations, as the original did. UART removed; RTT only. |
+| **Updates** | BLE DFU over SMP/mcumgr, MCUboot signed dual-slot with automatic rollback. |
+| **Footprint** | FLASH 48.5%, RAM 23.7% of an nRF52840. |
 
-Three blockers gate Phase 1: a **hardware decision**, a **legal review** of the
-GPL v2 / Apache 2.0 conflict, and **security disclosure** to the upstream
-maintainer.
+A second hardware target lives on [`feather-nrf52832`](../../tree/feather-nrf52832).
 
 ## Documentation
 
@@ -56,13 +54,21 @@ maintainer.
 ## Repository layout
 
 ```
-├── west.yml                 NCS v3.4.0 manifest          (untested)
-├── CMakeLists.txt           application scaffolding      (src/ is empty)
-├── prj.conf                 Kconfig starting point       (unverified)
-├── boards/                  devicetree overlays          (Phase 1)
-├── src/                     ported application           (Phase 3-4, empty)
+├── west.yml                 NCS v3.4.0 manifest
+├── CMakeLists.txt           application build
+├── prj.conf                 Kconfig
+├── boards/                  devicetree overlays per board
+├── dts/                     partition layouts and driver bindings
+├── src/                     the ported application
+│   ├── ble/                 GATT service (IPS)
+│   ├── aps/                 RileyLink subg_rfspy command layer
+│   ├── subg/                sub-GHz packet path
+│   ├── encoding/            4b6b and Manchester line coding
+│   ├── drivers/rf69/        RFM69 / SX1231 driver
+│   ├── battery/             ADC battery monitor
+│   └── indication/          status LED
 ├── keys/                    MCUboot signing keys         (public keys only in git)
-├── docs/                    Phase 0 deliverables
+├── docs/                    analysis and board notes
 └── legacy/                  read-only reference copy of the original firmware
 ```
 
@@ -80,28 +86,26 @@ maintainer.
 
 ## Building
 
-**Nothing builds yet.** `src/` is empty by design; Phase 0 produced analysis, not
-code.
+Requires the nRF Connect SDK v3.4.0 toolchain (`west`, Zephyr SDK). Nordic's
+`nrfutil toolchain-manager` is the supported way to install it.
 
-Once the chip decision (blocker B1) is made, the first Phase 1 task is to stand up
-the workspace and produce a real proof-of-fit build:
+> **Build paths must not contain spaces.** Zephyr's Kconfig fails on them with a
+> bare "no such file or directory". This cost real time — see MIGRATION_NOTES.
 
 ```bash
-west init -l /path/to/orangelink-ncs
+west init -l orangelink-ncs && west update && west zephyr-export
 ```
 
 ```bash
-west update && west zephyr-export
+west build -b xiao_ble --sysbuild orangelink-ncs -- \
+  -DSB_CONFIG_BOOTLOADER_MCUBOOT=y \
+  -DSB_CONFIG_BOOT_SIGNATURE_TYPE_ECDSA_P256=y \
+  -DSB_CONFIG_BOOT_SIGNATURE_KEY_FILE=\"$PWD/orangelink-ncs/keys/mcuboot-xiao-priv.pem\" \
+  -DEXTRA_DTC_OVERLAY_FILE="dts/orangelink-partitions.dtsi;dts/orangelink-app-slot0.overlay" \
+  -Dmcuboot_EXTRA_DTC_OVERLAY_FILE=dts/orangelink-partitions.dtsi
 ```
 
-```bash
-west build -b <board> --sysbuild
-```
-
-Requires the nRF Connect SDK toolchain (`west`, Zephyr SDK / ARM GCC). Nordic's
-`nrfutil toolchain-manager` is the supported way to install it. Note that the
-toolchain was **not** installed during Phase 0, so `west.yml` and `prj.conf` have
-never been exercised — expect to fix them.
+Signing keys are not in git — generate your own, see [`keys/README.md`](keys/README.md).
 
 ## Flashing
 
@@ -116,11 +120,16 @@ before any production flashing.
 
 ## License
 
-Upstream application code is **GPL v2 only** (44 files, per their headers).
-NCS and Zephyr are Apache 2.0. Whether these may be combined and distributed is
-**an open legal question and a blocker on publishing this fork** —
-[`docs/FEASIBILITY_REPORT.md`](docs/FEASIBILITY_REPORT.md) §B2. There is no
-top-level `LICENSE` file upstream.
+Upstream application code is **GPL v2 only** (44 files, per their headers), and the
+ported sources here carry `SPDX-License-Identifier: GPL-2.0-only` to match. NCS and
+Zephyr are Apache 2.0.
+
+Whether GPLv2 application code and an Apache-2.0 RTOS may be combined *and
+redistributed* is a genuine question, discussed in
+[`docs/FEASIBILITY_REPORT.md`](docs/FEASIBILITY_REPORT.md) §B2; there is no
+top-level `LICENSE` file upstream. This is published as a personal project on that
+basis rather than as settled advice — if you intend to distribute builds, form your
+own view.
 
 Original copyright: Fractal Auto Technology Co., Ltd. / Ribin Huang.
 
