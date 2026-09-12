@@ -67,7 +67,7 @@
 
 &spi1 {
 	status = "okay";
-	cs-gpios = <&gpio0 22 GPIO_ACTIVE_LOW>;
+	cs-gpios = <&gpio0 22 GPIO_ACTIVE_LOW>, <&gpio0 26 GPIO_ACTIVE_LOW>;
 
 	rf69: rf69@0 {
 		compatible = "orangelink,rfm69";
@@ -75,5 +75,25 @@
 		spi-max-frequency = <4000000>;
 		band = "916";
 		dio1-gpios = <&gpio0 23 GPIO_ACTIVE_HIGH>;
+	};
+};
+
+/*
+ * SX1276 for the OOK driver under development. Second chip select on the same
+ * bus; like the rf69 node above, nothing is wired -- this exists so
+ * CONFIG_ORANGELINK_SX1276 has a node to bind to and can be compiled and sized.
+ *
+ * DIO2 is the receive trigger (SyncAddressMatch), which is the SX1276's answer to
+ * the RFM69's DIO1/FifoNotEmpty -- see dts/bindings/spi/orangelink,sx1276.yaml.
+ */
+&spi1 {
+	sx1276: sx1276@1 {
+		compatible = "orangelink,sx1276";
+		reg = <1>;
+		spi-max-frequency = <4000000>;
+		band = "916";
+		dio0-gpios = <&gpio0 27 GPIO_ACTIVE_HIGH>;
+		dio2-gpios = <&gpio0 2 GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&gpio0 3 GPIO_ACTIVE_LOW>;
 	};
 };

@@ -51,6 +51,21 @@ config ORANGELINK_TX_LEGACY_TRUNCATE
 	  Rf69_SetPayloadLen(len + 1) once per burst, so legacy sent correctly sized
 	  frames too. Kept only as a diagnostic knob.
 
+config ORANGELINK_SX1276
+	bool "Build the SX1276 (RFM95) OOK radio driver"
+	default n
+	help
+	  Alternative radio to the RFM69/SX1231. Requires an `sx1276` node in
+	  devicetree; see dts/bindings/spi/orangelink,sx1276.yaml.
+
+	  Work in progress: the driver builds and self-tests, but the sub-GHz layer
+	  in src/subg still calls the RFM69 directly, so enabling this does not yet
+	  switch radios. It is here to be compiled, measured and reviewed.
+
+	  Configuration values follow ecc1/gnarl (MIT), a working SX1276 OOK driver
+	  for Medtronic pumps -- see docs/sx1276-reference.md for the six places
+	  where that disagrees with a transcription of our SX1231 table.
+
 menu "Status LED and battery"
 
 config ORANGELINK_LED

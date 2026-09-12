@@ -32,6 +32,9 @@
 #if defined(CONFIG_BOOTLOADER_MCUBOOT)
 #include <zephyr/dfu/mcuboot.h>
 #endif
+#if defined(CONFIG_ORANGELINK_SX1276)
+#include "sx1276.h"
+#endif
 
 LOG_MODULE_REGISTER(main, CONFIG_ORANGELINK_LOG_LEVEL);
 
@@ -404,6 +407,28 @@ int main(void)
 	k_work_schedule(&rf69_check_work, K_NO_WAIT);
 
 	aps_init();
+
+#if defined(CONFIG_ORANGELINK_SX1276)
+	/*
+	 * SX1276 bring-up, in parallel with the RFM69 rather than replacing it.
+	 *
+	 * The sub-GHz layer still talks to the RFM69, so this only proves the SPI
+	 * link, the OOK register set and the frequency read-back on whatever SX1276
+	 * is attached. Switching radios is the next step; keeping both live means
+	 * the working path is never broken to test the new one.
+	 */
+	{
+		struct sx1276_selftest st;
+
+		if (sx1276_init() == 0) {
+			sx1276_selftest_run(&st);
+			sx1276_selftest_report(&st);
+			if (st.link == SX1276_LINK_OK) {
+				sx1276_dump_regs();
+			}
+		}
+	}
+#endif
 
 	/*
 	 * Battery last: it takes over the LED from the boot flash, and a failure

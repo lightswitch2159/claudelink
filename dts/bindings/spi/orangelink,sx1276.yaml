@@ -1,0 +1,52 @@
+# Copyright (c) 2026
+# SPDX-License-Identifier: GPL-2.0-only
+
+description: |
+  Semtech SX1276 (HopeRF RFM95) sub-GHz transceiver on SPI, driven in OOK.
+
+  Zephyr's in-tree sx126x/sx1276 drivers are LoRa-only and expose no OOK path, so
+  this binding exists for the OOK driver in src/drivers/sx1276.
+
+  Chip select comes from the parent SPI controller's cs-gpios, matching the RFM69
+  binding.
+
+compatible: "orangelink,sx1276"
+
+include: spi-device.yaml
+
+properties:
+  dio0-gpios:
+    type: phandle-array
+    description: |
+      DIO0. In FSK/OOK packet mode with mapping 00 this is PacketSent on transmit
+      and PayloadReady on receive.
+
+  dio1-gpios:
+    type: phandle-array
+    description: |
+      DIO1. Unlike the RFM69, the SX1276 has no FifoNotEmpty mapping here -- the
+      choices are FifoLevel, FifoEmpty and FifoFull. Receive is therefore keyed on
+      sync match (see dio2-gpios) rather than on the first byte arriving.
+
+  dio2-gpios:
+    type: phandle-array
+    description: |
+      DIO2, mapped to SyncAddressMatch. This is the receive trigger: it fires when
+      the 4-byte sync word matches, which is also the moment RSSI must be sampled
+      while the carrier is still present. See MIGRATION_NOTES 13.3 for what
+      sampling it any later cost us.
+
+  reset-gpios:
+    type: phandle-array
+    description: |
+      SX1276 RESET, active low. The part expects a hardware reset at init; omit
+      only if it is tied off in hardware and power-on reset is relied upon.
+
+  band:
+    type: string
+    required: true
+    enum:
+      - "433"
+      - "868"
+      - "916"
+    description: Frequency band the module is matched for.
