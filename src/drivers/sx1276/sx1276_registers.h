@@ -155,6 +155,6 @@
 /* SX1276 silicon revision reported in RegVersion. */
 #define SX1276_VERSION          0x12
 
-#define SX1276_FIFO_SIZE        64
+/* SX1276_FIFO_SIZE lives in sx1276.h -- it is API, not a register. */
 
 #endif /* ORANGELINK_SX1276_REGISTERS_H_ */

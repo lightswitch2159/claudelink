@@ -19,6 +19,9 @@
 extern "C" {
 #endif
 
+/* SX1276 FIFO depth. The SX1231's is 66; do not assume they match. */
+#define SX1276_FIFO_SIZE 64
+
 enum sx1276_mode {
 	SX1276_MODE_SLEEP = 0,
 	SX1276_MODE_STANDBY,
