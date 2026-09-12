@@ -219,7 +219,7 @@ companion-app compatibility. Do not "clean these up."
 | `CMD_RESET` (`0x07`) has no handler — **no response at all** | Client times out. Changing this is a protocol change. |
 | `CMD_LED` (`0x08`), `CMD_SET_MODE_REG` (`0x0A`), LED Mode writes | Accepted, ignored, return success. |
 | `CMD_READ_REG` returns constant `0x5A` for all addresses except `0x09`–`0x0B` | A stub, not a real register read. |
-| Trailing single zero byte stripped for Minimed, **kept** for Omnipod | Get it wrong and Omnipod packets corrupt silently. |
+| Trailing single zero byte stripped for Minimed | Get it wrong and packets corrupt silently. |
 | RSSI reported as `(dBm + 73) × 2`, `uint8_t` truncation included | CC111x emulation for RileyLink clients. |
 | Out-of-band frequency logged and **discarded**, radio keeps previous setting | |
 | Response Count incremented **only** when the value write succeeded | Zephyr's async `bt_gatt_notify()` needs `bt_gatt_notify_cb()` to match. |
@@ -466,15 +466,15 @@ path. Decide in Phase 5.
 ## 7. Scope narrowed to 916 MHz, single radio
 
 Project scope is **916 MHz Minimed only**. The legacy design fitted **two** RFM69
-modules -- `RF69_DEV_FREQ433` (Omnipod) and `RF69_DEV_FREQ916N868` (Minimed) --
+modules -- one at 433 MHz and `RF69_DEV_FREQ916N868` (Minimed) --
 each with its own chip select. Only one is fitted now.
 
 Not ported, deliberately:
 
 - the 433 MHz (`freq433CfgTbl`) and 868 MHz (`freq868CfgTbl`) register tables
 - the second radio instance, its chip select and its DIO0 line
-- Omnipod-specific paths in `app_subg.c` (`omnipod_rx`, the 80-byte packet mode)
-- `SUBG_MODE_OMNIPOD` and `SUBG_MODE_MINIMED_WWL`
+- the 433 MHz radio's receive path and 80-byte packet mode in `app_subg.c`
+- the 433 MHz and 868 MHz sub-GHz modes
 
 Pin usage drops to **7 of 11** header pins; D1 and D3 are now free.
 
