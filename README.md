@@ -4,7 +4,7 @@ A fork of [birdfly/Orangelink-Firmware](https://github.com/birdfly/Orangelink-Fi
 being migrated from the legacy nRF5 SDK to the nRF Connect SDK (Zephyr).
 
 A sub-GHz ↔ BLE bridge that speaks the RileyLink-compatible `subg_rfspy` protocol
-to a **Medtronic Minimed pump at 916 MHz** over an external RFM69 radio.
+to a **Medtronic Minimed pump at 916 MHz** over an external sub-GHz radio.
 
 Scope is 916 MHz Minimed only. The original firmware also drove a second radio at
 433 MHz and an 868 MHz band; neither is fitted or supported here, and the
@@ -26,20 +26,20 @@ corresponding code paths were deliberately not ported.
 
 ## Status: work in progress — NOT tested on hardware
 
-This branch builds on the verified XIAO nRF52840 port
-([`xiao-nrf52840-sense`](../../tree/xiao-nrf52840-sense)) and adds:
+Target: an **SX1276** radio at 916 MHz on a **Seeed XIAO nRF52840**. This branch
+adds:
 
 * a **radio abstraction** (`src/drivers/radio.h`) so the packet layer talks to *a*
   radio rather than to the RFM69 by name, and
 * an **SX1276 OOK driver skeleton** (`src/drivers/sx1276/`), modelled on GNARL's
   known-working SX1276 OOK configuration.
 
-**None of it has been exercised against a real SX1276 or a pump.** The motivation is
-that the SX1276 family supports OOK — which this link requires, and which the newer
-SX126x parts cannot do at all.
+**None of it has been exercised against a real SX1276 or a pump.** It compiles; that
+is all that is known about it. Do not use this branch for pump communication.
 
-For a working build, use [`xiao-nrf52840-sense`](../../tree/xiao-nrf52840-sense) or
-[`feather-nrf52832`](../../tree/feather-nrf52832).
+The motivation is that the SX1276 family supports **OOK**, which the Medtronic link
+requires. The newer SX126x parts (SX1262, as used on the T-Echo and RAK4630) offer
+only GFSK and LoRa and cannot carry this link at all — see MIGRATION_NOTES §20.
 
 ## Documentation
 
@@ -66,7 +66,9 @@ For a working build, use [`xiao-nrf52840-sense`](../../tree/xiao-nrf52840-sense)
 │   ├── aps/                 RileyLink subg_rfspy command layer
 │   ├── subg/                sub-GHz packet path
 │   ├── encoding/            4b6b and Manchester line coding
-│   ├── drivers/rf69/        RFM69 / SX1231 driver
+│   ├── drivers/radio.h      radio abstraction
+│   ├── drivers/rf69/        RFM69 / SX1231 driver (working)
+│   ├── drivers/sx1276/      SX1276 OOK driver     (UNTESTED)
 │   ├── battery/             ADC battery monitor
 │   └── indication/          status LED
 ├── keys/                    MCUboot signing keys         (public keys only in git)
@@ -88,14 +90,18 @@ For a working build, use [`xiao-nrf52840-sense`](../../tree/xiao-nrf52840-sense)
 
 ## Building
 
-Requires the nRF Connect SDK v3.4.0 toolchain (`west`, Zephyr SDK). Builds the same
-way as [`xiao-nrf52840-sense`](../../tree/xiao-nrf52840-sense); the SX1276 driver on
-this branch compiles but has never been run against hardware.
+Requires the nRF Connect SDK v3.4.0 toolchain (`west`, Zephyr SDK).
 
 ```bash
 west init -l orangelink-ncs && west update && west zephyr-export
-west build -b xiao_ble --sysbuild orangelink-ncs -- ...
 ```
+
+```bash
+west build -b xiao_ble -d build orangelink-ncs
+```
+
+The SX1276 driver compiles into the image but has never been run against hardware,
+so a successful build says nothing about whether it works.
 
 ## Flashing
 
