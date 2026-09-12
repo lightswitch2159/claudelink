@@ -1,12 +1,27 @@
 # Migration Notes
 
-Every intended or discovered deviation from the original firmware's behaviour.
-Living document — append as porting proceeds.
+Every intended or discovered deviation from the original firmware's behaviour,
+and the reasoning behind each one.
 
-**Phase 0 status: no code ported, so no behavioural deviations exist yet.**
-Everything below is either a *planned* deviation (with rationale) or a
-*discrepancy found* between the migration brief, the scoping document, and what
-the source actually does.
+**Status: this branch is WORK IN PROGRESS and has NOT been tested on hardware.**
+
+It builds on the verified XIAO nRF52840 port (`xiao-nrf52840-sense`) and adds:
+
+* a radio abstraction (`src/drivers/radio.h`) so the packet layer talks to *a*
+  radio rather than to the RFM69 by name, and
+* an **SX1276 OOK driver skeleton** (`src/drivers/sx1276/`), modelled on GNARL's
+  known-working SX1276 OOK configuration.
+
+None of it has been exercised against a real SX1276 or a pump. The motivation is
+that the SX1276 family supports OOK -- which the Medtronic link requires and which
+the newer SX126x parts cannot do at all -- so it is the sensible second radio if
+the SX1231 is ever unavailable. See section 20.
+
+For a working, pump-verified build use `xiao-nrf52840-sense` or
+`feather-nrf52832`.
+
+Sections 1-2 record what was found *before* any code was written. Everything from
+section 3 onward is implemented and tested on the branches named above.
 
 ---
 
@@ -84,9 +99,10 @@ name and two indication toggles. Document it in release notes; skip the tool.
 
 ---
 
-## 2. Planned deviations from original behaviour
+## 2. Deliberate deviations from original behaviour
 
-Deliberate changes. Each needs sign-off before Phase 4 completes.
+Decided in advance, before porting began. All of these are now implemented; where
+one later proved wrong or needed revisiting, a later section says so.
 
 ### 2.1 Bounds checking added to all three command parsers — REQUIRED
 
