@@ -37,8 +37,6 @@ on a **Seeed XIAO nRF52840** with an RFM69HCW at 916 MHz.
 | **Updates** | BLE DFU over SMP/mcumgr, MCUboot signed dual-slot with automatic rollback. |
 | **Footprint** | FLASH 48.5%, RAM 23.7% of an nRF52840. |
 
-A second hardware target lives on [`feather-nrf52832`](../../tree/feather-nrf52832).
-
 ## Documentation
 
 | Document | Contents |
