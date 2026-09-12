@@ -1787,3 +1787,80 @@ there is no bridge, then use the debugger as a signal generator and a meter as t
 receiver to find where a known-good signal stops arriving. **The instrument to
 reach for on "the peripheral does not answer" is a voltmeter and a latched pin,
 not another part.**
+
+## 19. Would it fit on a RAK4600? Measured, not estimated
+
+The RAK4600 is **nRF52832 + SX1276**. That matters because the SX1276 *does*
+support OOK -- `RF_OPMODE_MODULATIONTYPE_OOK` plus a dedicated OOK demodulator
+(`REG_OOKPEAK`, `REG_OOKFIX`, `REG_OOKAVG`, OOK bit-sync) -- so unlike the SX1262
+it can carry the Medtronic link at all. Watch the part numbers: **RAK4631 is
+nRF52840 + SX1262**, more MCU but the wrong radio.
+
+That leaves resources as the only question, so it was measured rather than
+extrapolated.
+
+### 19.1 Method
+
+Zephyr has no RAK4600 board, so `nrf52dk/nrf52832` stands in: same die, same
+512 KB / 64 KB budget, and its **default partition layout is already MCUboot
+dual-slot** (48 K boot, 2 x 220 K slots, 24 K storage) -- no custom partition file
+needed.
+
+`boards/nrf52dk_nrf52832.overlay` supplies the devicetree nodes the application
+references (`orangelink-led-{r,g,b}`, `vbat_enable`, `chg_current`, `zephyr,user`
+io-channels, and the `rf69` node). **Pin choices there are arbitrary and nothing is
+wired** -- they exist only so the code links and can be measured. It is a
+feasibility artifact, not a proposed pinout.
+
+### 19.2 Result: it fits, with OTA rollback intact
+
+| variant | FLASH | of 220 K slot | RAM | of 64 K |
+|---|---|---|---|---|
+| as-is | 179104 B | **82.6%** | 51596 B | **78.7%** |
+| buffers trimmed, DFU kept | 179104 B | 82.6% | 41632 B | **63.5%** |
+| no SMP DFU | 166780 B | 76.9% | 38368 B | 58.5% |
+
+RAM is the binding constraint, and roughly 10 KB of it is recoverable by config
+alone: `MCUMGR_TRANSPORT_NETBUF_SIZE` 2475->1024, `NETBUF_COUNT` 4->2,
+`SEGGER_RTT_BUFFER_SIZE_UP` 2048->512, `LOG_BUFFER_SIZE` 1024->512. Those affect
+**DFU throughput and log fidelity only**. The settings that are load-bearing for
+pump traffic were deliberately left alone and verified present in the trimmed
+build: `BT_ATT_PREPARE_COUNT=12` (long writes from AndroidAPS),
+`BT_L2CAP_TX_MTU=247`, `BT_BUF_ACL_RX_SIZE=251`.
+
+So the realistic target is the middle row: **82.6% flash, 63.5% RAM, keeping
+signed dual-slot OTA.**
+
+### 19.3 Why there is more headroom than it looks
+
+Our own code is a small fraction of the image:
+
+```
+aps                 3008 B      rf69 driver         5802 B
+subg                4264 B      ips                 2148 B
+main                2314 B      battery             1674 B
+led                  837 B      4b6b + manchester    674 B
+                                --------------------------
+our application total          20721 B text, 3013 B bss
+```
+
+**20.2 KB of a 175 KB image.** The rest is Zephyr, the BLE controller and host,
+mcumgr and libc -- none of which grows as features are added. Adding application
+features is cheap here; the fixed cost is what nearly fills the part.
+
+### 19.4 Caveats
+
+* **The SX1276 driver does not exist.** These figures include the SX1231/RFM69
+  driver, which is 5802 B. A replacement is a rewrite (different register map,
+  FIFO semantics and DIO mapping), but even doubling that figure is +6 KB against
+  ~37 KB of flash headroom, so it is not a fit risk. `sx1276Regs-Fsk.h` is already
+  in-tree, which helps.
+* **The DK is not the module.** RAK4600 exposes fewer GPIO, and its SX1276 DIO
+  lines are routed internally -- the design here depends on a DIO interrupt for
+  FifoNotEmpty, so which DIOs reach the nRF52832 needs checking in the datasheet.
+  Without one, receive falls back to SPI polling, which is what made the legacy
+  firmware block for seconds.
+* **Band variant.** RAK4600 ships in 868 and 915 flavours; the die is wideband but
+  the matching network is not. 916.5 MHz needs the 915 part.
+* nRF52832 has no USB, which costs nothing here since the UART and USB console
+  were already removed.

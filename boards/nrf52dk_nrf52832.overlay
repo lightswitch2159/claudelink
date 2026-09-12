@@ -1,0 +1,79 @@
+/*
+ * FEASIBILITY STUDY ONLY -- not a supported target.
+ * SPDX-License-Identifier: GPL-2.0-only
+ *
+ * Builds the application for an nRF52832 so its real flash and RAM footprint can
+ * be measured against the RAK4600 (nRF52832 + SX1276), rather than extrapolated
+ * from the nRF52840 build.
+ *
+ * The nRF52 DK is used as the stand-in because Zephyr has no RAK4600 board (the
+ * rak4631 in-tree is nRF52840 + SX1262, which cannot do OOK and so cannot talk to
+ * a pump at all). Same die, same 512 KB / 64 KB budget, so the numbers transfer.
+ *
+ * Pin choices here are arbitrary -- nothing is wired. They exist only to satisfy
+ * the devicetree references the application makes, so the code links and can be
+ * measured. Do NOT read this as a proposed RAK4600 pinout.
+ *
+ * What this measurement does NOT capture: the SX1276 driver does not exist. The
+ * figure below is for the existing SX1231/RFM69 driver, so treat it as a floor --
+ * an SX1276 driver would be of broadly similar size, not smaller.
+ */
+
+/ {
+	aliases {
+		/* The DK has four discrete LEDs; the application wants an RGB triple.
+		 * Mapping three of them keeps the colour model compiling.
+		 */
+		orangelink-led-r = &led0;
+		orangelink-led-g = &led1;
+		orangelink-led-b = &led2;
+	};
+
+	/* ADC handle for the battery monitor. */
+	zephyr,user {
+		io-channels = <&adc 7>;
+	};
+
+	orangelink {
+		compatible = "gpio-keys";
+
+		vbat_enable: vbat_enable {
+			gpios = <&gpio0 24 GPIO_ACTIVE_LOW>;
+			label = "VBAT read enable";
+		};
+
+		chg_current: chg_current {
+			gpios = <&gpio0 25 GPIO_ACTIVE_LOW>;
+			label = "Charge current select";
+		};
+	};
+};
+
+&adc {
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	channel@7 {
+		reg = <7>;
+		zephyr,gain = "ADC_GAIN_1_4";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,input-positive = <NRF_SAADC_AIN7>;
+		zephyr,resolution = <12>;
+		zephyr,oversampling = <4>;
+	};
+};
+
+&spi1 {
+	status = "okay";
+	cs-gpios = <&gpio0 22 GPIO_ACTIVE_LOW>;
+
+	rf69: rf69@0 {
+		compatible = "orangelink,rfm69";
+		reg = <0>;
+		spi-max-frequency = <4000000>;
+		band = "916";
+		dio1-gpios = <&gpio0 23 GPIO_ACTIVE_HIGH>;
+	};
+};
