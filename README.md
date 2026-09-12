@@ -26,18 +26,19 @@ corresponding code paths were deliberately not ported.
 
 ## Status: working — Adafruit Feather nRF52832 target
 
-This branch targets the **Adafruit Feather nRF52832** (product 3406) with an
-**RFM69HCW Radio FeatherWing**, alongside the XIAO nRF52840 build on
-[`xiao-nrf52840-sense`](../../tree/xiao-nrf52840-sense).
+Target: **Adafruit Feather nRF52832** (product 3406) with an **RFM69HCW Radio
+FeatherWing**, at 916 MHz.
 
 | | |
 |---|---|
 | **RF self-test** | Passes: `VERSION = 0x24`, FIFO and 4b6b datapath, DIO1 interrupt on P0.07, TX completion. |
-| **Bootloader** | Keeps the **stock Adafruit bootloader** (0.9.1 + S132 6.1.1) rather than installing MCUboot. |
-| **Updates** | USB serial DFU and BLE OTA, both verified. No SMP/mcumgr, since there are no MCUboot slots. |
+| **Bootloader** | Stock Adafruit bootloader, 0.9.1 + S132 6.1.1. The application links at `0x26000`. |
+| **Updates** | USB serial DFU and BLE OTA, both verified on hardware. No debug probe required. |
 | **Footprint** | FLASH 52.7%, RAM 57.2% of an nRF52832. |
 
-Wiring and board-specific behaviour: [`docs/BOARD-feather-nrf52832.md`](docs/BOARD-feather-nrf52832.md).
+Wiring: RFM69 **CS to P0.11**, **DIO1 to P0.07**; SCK/MOSI/MISO come through the
+Feather header. Full board notes:
+[`docs/BOARD-feather-nrf52832.md`](docs/BOARD-feather-nrf52832.md).
 
 Two known quirks, both documented: the board has only two LEDs (no green, so the
 battery indicator's "green" is blue), and the battery divider needed an empirical
@@ -53,7 +54,6 @@ single-point calibration whose 43% nominal error is **unexplained**.
 | [`docs/aps-protocol-spec.md`](docs/aps-protocol-spec.md) | RileyLink APS wire format, frame structures, concurrency hazards |
 | [`docs/config-storage-spec.md`](docs/config-storage-spec.md) | Persisted config structures and the NUS config protocol |
 | [`MIGRATION_NOTES.md`](MIGRATION_NOTES.md) | Every intended deviation from original behaviour |
-| [`keys/README.md`](keys/README.md) | MCUboot signing keys and why the legacy ones are unusable |
 
 ## Repository layout
 
@@ -71,7 +71,6 @@ single-point calibration whose 43% nominal error is **unexplained**.
 │   ├── drivers/rf69/        RFM69 / SX1231 driver
 │   ├── battery/             ADC battery monitor
 │   └── indication/          status LED
-├── keys/                    MCUboot signing keys         (public keys only in git)
 ├── docs/                    analysis and board notes
 └── legacy/                  read-only reference copy of the original firmware
 ```
@@ -90,7 +89,8 @@ single-point calibration whose 43% nominal error is **unexplained**.
 
 ## Building
 
-Requires the nRF Connect SDK v3.4.0 toolchain (`west`, Zephyr SDK).
+Requires the nRF Connect SDK v3.4.0 toolchain (`west`, Zephyr SDK). Nordic's
+`nrfutil toolchain-manager` is the supported way to install it.
 
 > **Build paths must not contain spaces.** Zephyr's Kconfig fails on them with a
 > bare "no such file or directory".
@@ -100,23 +100,91 @@ west init -l orangelink-ncs && west update && west zephyr-export
 ```
 
 ```bash
-west build -b nrf52_adafruit_feather orangelink-ncs -- \
-  -DEXTRA_DTC_OVERLAY_FILE="$PWD/orangelink-ncs/dts/feather-stock-bootloader.dtsi"
+west build -b nrf52_adafruit_feather -d build orangelink-ncs -- -DEXTRA_DTC_OVERLAY_FILE="$PWD/orangelink-ncs/dts/feather-stock-bootloader.dtsi"
 ```
 
-No MCUboot and no signing key: this target keeps the stock Adafruit bootloader, so
-the application links at `0x26000` where that bootloader expects it.
+No second bootloader is built and no signing key is needed: the board keeps its
+stock bootloader, the application links at `0x26000` where that bootloader expects
+it, and the build produces a plain `zephyr.hex`.
+
+Measured: FLASH 164064 B of 304 KB (52.7%), RAM 37512 B of 64 KB (57.2%).
+
+### Run the unit tests
+
+```bash
+west twister -T orangelink-ncs/tests -p native_sim
+```
 
 ## Flashing
 
-Legacy tooling (`nrfjprog` + `mergehex` + `nrfutil pkg`, driven by the `.bat`
-scripts in `legacy/update/`) does **not** apply to an NCS build. MCUboot images are
-produced and signed by `imgtool` via the build system, and flashed with
-`west flash`. Do not mix the two toolchains.
+### Over USB — the normal path
 
-The legacy scripts also set `UICR APPROTECT` (`nrfjprog --memwr 0x10001208 --val
-0xFFFFFF00`). Readback protection needs an equivalent decision in the NCS build
-before any production flashing.
+No probe needed. Package the hex and send it to the bootloader:
+
+```bash
+pip install adafruit-nrfutil
+```
+
+```bash
+adafruit-nrfutil dfu genpkg --dev-type 0x0052 --application build/orangelink-ncs/zephyr/zephyr.hex fw.zip
+```
+
+```bash
+adafruit-nrfutil dfu serial --package fw.zip -p /dev/ttyUSB0 -b 115200 --singlebank
+```
+
+The port is a **CP2104 bridge**, so it appears as `/dev/ttyUSB0`, not `ttyACM0` —
+the nRF52832 has no USB peripheral of its own. That also means **this board is not
+UF2**: Adafruit's UF2 bootloaders are nRF52840-only.
+
+If it reports *"No data received on serial port"* while the red LED blinks about
+twice a second, the bootloader is in serial DFU mode but too old for current
+tooling. That is fixable — see below.
+
+### Over BLE
+
+The bootloader and the application both expose the Nordic legacy DFU service
+(`00001530-1212-efde-1523-785feabcd123`), so the same `fw.zip` can be uploaded from
+nRF Connect or Bluefruit LE Connect on a phone.
+
+### Updating the bootloader
+
+Needed once if serial DFU fails at the init packet. The BSP ships the image:
+
+```bash
+pyocd flash -t nrf52832 ~/.arduino15/packages/adafruit/hardware/nrf52/1.7.0/bootloader/feather_nrf52832/feather_nrf52832_bootloader-0.9.1_s132_6.1.1.hex
+```
+
+It writes the MBR, SoftDevice, bootloader and the UICR bootloader-address
+registers, and leaves the application at `0x26000` untouched.
+
+## Debugging
+
+### SWD needs USB power
+
+SWD fails completely on this board when it runs on battery alone — `Unexpected ACK
+'0'` at every clock rate and every connect mode — and works first time with USB
+connected. **Plug in USB before debugging.**
+
+SWDIO and SWCLK are pads on the underside of the PCB; share GND, and do **not**
+connect the probe's 3V3 while the board is on USB.
+
+```bash
+pyocd flash -t nrf52832 build/orangelink-ncs/zephyr/zephyr.hex
+```
+
+This writes only `0x026000`–`0x04E0E0`, so the MBR, SoftDevice and bootloader all
+survive and the DFU paths keep working.
+
+### Reading state without RTT
+
+RTT on this board reproducibly dies at `[00:00:01.119` — exactly when the first
+battery sample runs — which is unexplained. Battery state can be read straight out
+of RAM instead, which is reliable:
+
+```bash
+pyocd commander -t nrf52832 -c "read16 0x$(nm build/orangelink-ncs/zephyr/zephyr.elf | awk '/ last_mv$/{print $1}')"
+```
 
 ## License
 
@@ -132,128 +200,3 @@ basis rather than as settled advice — if you intend to distribute builds, form
 own view.
 
 Original copyright: Fractal Auto Technology Co., Ltd. / Ribin Huang.
-
----
-
-## Toolchain setup (verified working)
-
-Workspace lives **outside** this repo at `/home/user/ai/orangelink-ncs-ws`.
-Zephyr's build breaks on paths containing spaces, which is why it is not under
-the original `OL SDK Update/` directory.
-
-| Component | Version |
-|---|---|
-| nRF Connect SDK (`sdk-nrf`) | v3.4.0 |
-| Zephyr (`sdk-zephyr`) | ncs-v3.4.0 / 4.4.0 |
-| Zephyr SDK | 1.0.1 (`arm-zephyr-eabi-gcc` 14.3.0) |
-| Board | `xiao_ble` (upstream Zephyr, `seeed/xiao_ble`) |
-
-```bash
-. /home/user/ai/orangelink-ncs-ws/env.sh
-```
-
-### Build: plain application (USB-flashable, no MCUboot)
-
-Keeps the board's UF2 partition layout, so it can be flashed by drag-and-drop
-over USB. This is the bring-up path.
-
-```bash
-west build -b xiao_ble -d build orangelink-ncs
-```
-
-### Build: with MCUboot dual-slot, signed
-
-Replaces the UF2 bootloader, so **this variant requires SWD to flash**.
-
-```bash
-west build -b xiao_ble -d build-mcuboot --sysbuild orangelink-ncs -- -DSB_CONFIG_BOOTLOADER_MCUBOOT=y -DSB_CONFIG_BOOT_SIGNATURE_TYPE_ECDSA_P256=y -DSB_CONFIG_BOOT_SIGNATURE_KEY_FILE=\"$PWD/orangelink-ncs/keys/mcuboot-xiao-priv.pem\" -DEXTRA_DTC_OVERLAY_FILE="$PWD/orangelink-ncs/dts/orangelink-partitions.dtsi;$PWD/orangelink-ncs/dts/orangelink-app-slot0.overlay" -Dmcuboot_EXTRA_DTC_OVERLAY_FILE=$PWD/orangelink-ncs/dts/orangelink-partitions.dtsi
-```
-
-`orangelink-partitions.dtsi` goes to **both** images; `orangelink-app-slot0.overlay`
-to the **application only**. Sending the latter to MCUboot gives the bootloader
-`FLASH_LOAD_OFFSET=0xc000` and produces a clean build that does not boot.
-Always check link addresses after changing partitions.
-
-### Run the unit tests
-
-```bash
-west build -b native_sim -d build-tests orangelink-ncs/tests/encoding && ./build-tests/encoding/zephyr/zephyr.exe
-```
-
-## Debug probe: Raspberry Pi Pico as CMSIS-DAP
-
-The XIAO has no onboard debug probe. A Pico 1 (RP2040) flashed with Raspberry Pi
-`debugprobe` v2.3.1 (`debugprobe_on_pico.uf2`) works as a CMSIS-DAP probe and is
-driven by pyOCD, which has a builtin `nrf52840` target.
-
-Flash the Pico by holding BOOTSEL while plugging in, then copying the UF2 to the
-`RPI-RP2` volume. It returns as USB `2e8a:000c`.
-
-### One-time udev rule
-
-Without this, pyOCD reports "No available debug probes are connected" because
-`/dev/bus/usb/*` is root-only:
-
-```bash
-sudo install -m 644 /home/user/ai/orangelink-ncs-ws/orangelink-ncs/tools-udev-60-cmsis-dap.rules /etc/udev/rules.d/60-cmsis-dap.rules && sudo udevadm control --reload-rules && sudo udevadm trigger
-```
-
-### Wiring, Pico -> XIAO nRF52840
-
-Pico pins are fixed by the stock firmware (`board_pico_config.h`): SWCLK and
-SWDIO must be consecutive, `SWCLK = PROBE_PIN_OFFSET + 0`, `SWDIO = +1`.
-Changing them requires rebuilding debugprobe from source against the Pico SDK.
-
-| Signal | Pico GPIO | Pico physical pin |
-|---|---|---|
-| SWCLK | GP2 | 4 |
-| SWDIO | GP3 | 5 |
-| GND | — | 3 (or any GND) |
-| target RESET (optional) | GP1 | 2 |
-| UART TX -> target RX | GP4 | 6 |
-| UART RX <- target TX | GP5 | 7 |
-
-On the XIAO, SWDIO/SWCLK are **small test pads on the underside**. Published test
-point numbering is inconsistent between sources, so do not trust a TP map --
-including any in this file. Practical approach:
-
-- Take **GND from the castellated header pin**, which is clearly labelled. No need
-  to find a GND test pad.
-- Only **two** pads actually need soldering: SWDIO and SWCLK.
-- Swapping SWDIO and SWCLK cannot damage anything -- pyOCD simply fails to
-  connect. Try one orientation, swap if it fails.
-- **Do not connect the probe's 3V3** while the XIAO is powered over USB-C.
-  Dual-powering it has been reported to corrupt bootloaders. Power the XIAO from
-  USB-C (this works even with a charge-only cable) and connect only
-  SWDIO / SWCLK / GND.
-
-### Reading the log over RTT
-
-```bash
-pyocd reset -t nrf52840                       # probe must be free for this
-pyocd rtt   -t nrf52840 -M attach             # -M attach is load-bearing
-```
-
-Two traps, both of which look like "RTT is broken" when they are not:
-
-* **`-M attach` matters.** pyOCD's default connect mode *halts the core*, so the
-  board stops running and emits nothing. The session attaches cleanly, reports
-  "3 up channels ... Reading from up channel 0", and then sits silent forever.
-* **Only one pyOCD can hold the probe.** Running `pyocd reset` while `pyocd rtt`
-  is attached silently does nothing, so there is no boot output to see. Reset
-  first, then attach -- `CONFIG_LOG_PROCESS_THREAD_STARTUP_DELAY_MS=4000` holds
-  the boot burst long enough to catch it.
-
-Attaching to an already-running, healthy board correctly shows *nothing*: at idle
-the only periodic message is the battery sample every 3 minutes, and that is
-`LOG_DBG` unless the charge colour changes. Silence is not a fault.
-
-### Flash over SWD
-
-```bash
-pyocd flash --target nrf52840 build/orangelink-ncs/zephyr/zephyr.hex
-```
-
-```bash
-pyocd gdbserver --target nrf52840
-```
