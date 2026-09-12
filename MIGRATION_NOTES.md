@@ -95,7 +95,7 @@ constant.
 
 ### 1.6 Bare-metal option does not exist for nRF52
 
-The scoping document treats `CONFIG_KERNEL=n` as an NCS Kconfig that might reduce
+The scoping document treats `CONFIG_KERNEL=n` as an nRF Connect SDK (NCS) Kconfig that might reduce
 footprint. NCS Bare Metal is a **separate SDK** (`ncs-bm`, v2.0.99) supporting
 **nRF54L Series only**. Remove this branch from the plan; Zephyr is the only NCS
 architecture available for nRF52.

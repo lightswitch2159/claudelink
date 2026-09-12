@@ -1,7 +1,8 @@
 # Orangelink NCS
 
 A fork of [birdfly/Orangelink-Firmware](https://github.com/birdfly/Orangelink-Firmware)
-being migrated from the legacy nRF5 SDK to the nRF Connect SDK (Zephyr).
+ported from the legacy nRF5 SDK to the **nRF Connect SDK (NCS)** — Nordic's current
+SDK, built on the Zephyr RTOS. "NCS" is used throughout this repository to mean that.
 
 A sub-GHz ↔ BLE bridge that speaks the RileyLink-compatible `subg_rfspy` protocol
 to a **Medtronic Minimed pump at 916 MHz** over an external RFM69 radio.
