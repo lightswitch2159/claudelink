@@ -93,42 +93,40 @@ Double-tap reset first to enter the bootloader.
    or MCUboot flashed onto it before, the bootloader may already be gone — and
    restoring it needs one SWD flash of Adafruit's release.
 
-## Battery calibration
+## Battery divider
 
-Calibrated against a cell measured at **3.86 V**:
-
-```
-CONFIG_ORANGELINK_BATTERY_OUTPUT_OHMS=100000
-CONFIG_ORANGELINK_BATTERY_FULL_OHMS=139300     # nominal would be 200000
-```
-
-Result: `last_mv = 3857 mV`, `last_percent = 56%` — within 0.1% of the meter.
-
-**The 43% error this corrects is unexplained**, and that matters more than the fix.
-The nominal ratio of 2.0 is right per the board spec, and the configuration was
-verified in the generated devicetree:
+Read off the **Rev G schematic**, LIPO MONITORING block:
 
 ```
-reg = 0x7, zephyr,input-positive = 0x7   -> AIN7 / P0.31
-zephyr,gain = ADC_GAIN_1_6, ref INTERNAL -> 3600 mV full scale
-zephyr,resolution = 0xc                  -> 12-bit
+VBAT --[ R4 806k ]--+--[ R6 2M ]-- GND
+                    |
+                  A7 / P0.31
 ```
 
-A 3.86 V cell should give 1930 mV at the pin and a raw count near 2195 of 4095.
-Instead the firmware derived 5542 mV, implying ~3152 raw — high, but **not
-clipping**, so saturation is ruled out. Raising the acquisition time to 40 us for
-the ~50 kOhm source impedance (Nordic's guidance for that range) changed nothing:
-5526 mV before, 5542 mV after.
+```
+CONFIG_ORANGELINK_BATTERY_OUTPUT_OHMS=2000000
+CONFIG_ORANGELINK_BATTERY_FULL_OHMS=2806000      # 806k + 2M
+```
 
-43% is far too large for resistor tolerance, so a systematic factor is at work that
-has not been identified. Consequences to keep in mind:
+Ratio 2M/2.806M = **0.7128**, so cell = pin x 1.4030. Adafruit annotate the same
+drawing with *"Maximum voltage: 4.2 V \* (2 M/(0.8 M+2 M)) = 3 V"*, which agrees.
 
-* This is a **single-point** calibration. Linearity has not been checked, so the
-  reading may drift at other voltages. Verify against a meter at a second point --
-  ideally near 3.5 V and near 4.1 V -- before trusting the percentage.
-* If the cause is later found (a different reference, an unexpected gain, or a
-  divider that is not what the spec says), `FULL_OHMS` should go back to nominal
-  and the real fault be corrected instead.
+**This is not 100k/100k.** The board's text specs say the divider is 100k/100k with
+a compensation factor of 2.0; the schematic says otherwise, and the hardware agrees
+with the schematic. Assuming 0.5 made every reading **1.43x high** — 5542 mV against
+a cell measured at 3860 mV — and the ratio error (0.7128/0.5 = 1.426) matches the
+observed error (1.436) almost exactly.
+
+Residual with the correct nominal values: **+0.72%**, which is resistor tolerance
+(R4 is a 1% part). Trimming `FULL_OHMS` to 2786000 matches this particular unit
+exactly, but that is a per-board refinement, not a fix for anything.
+
+ADC gain 1/6 gives a 3600 mV full scale; a 4.2 V cell presents 2994 mV, so 83% of
+range with no clipping.
+
+**Lesson worth keeping:** a 43% error is never resistor tolerance. It was treated as
+an unexplained scale factor and papered over with an empirical constant for longer
+than it should have been — reading the schematic settled it in one look.
 
 ### Reading battery state without RTT
 
