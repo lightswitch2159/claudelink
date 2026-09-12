@@ -105,7 +105,7 @@ struct rf69_selftest {
 };
 
 /**
- * @brief Bind the SPI device and DIO0 GPIO from devicetree.
+ * @brief Bind the SPI device and DIO1 GPIO from devicetree.
  *
  * Does not touch the radio. Returns -ENODEV if the bus is not ready.
  */
@@ -164,9 +164,15 @@ int rf69_rssi_survey(int16_t *min_dbm, int16_t *max_dbm);
 
 /* --- DIO1 interrupt ---
  *
- * The legacy hardware never routed DIO0, so the driver busy-polled REG_IRQFLAGS2
- * over SPI. On this board DIO0 is wired, so RX can block on a semaphore instead
- * of spinning. See docs/aps-protocol-spec.md section 6.2.
+ * The legacy hardware routed no DIO at all, so the driver busy-polled
+ * REG_IRQFLAGS2 over SPI and Subg_GetPkt() blocked for seconds. Here DIO1 is
+ * wired, so RX can block on a semaphore instead of spinning.
+ *
+ * DIO1, not DIO0. DIO0's PayloadReady never asserts for a normal short packet
+ * under our fixed PayloadLength, so it cannot drive receive. DIO0 is left
+ * unrouted on purpose -- it is only useful if TX-done via PacketSent ever wants
+ * its own line, and TX is polled because it is short and bounded.
+ * See docs/aps-protocol-spec.md section 6.2.
  */
 int rf69_dio1_irq_enable(struct k_sem *sem);
 int rf69_dio1_irq_disable(void);
