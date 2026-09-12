@@ -1855,12 +1855,75 @@ features is cheap here; the fixed cost is what nearly fills the part.
   FIFO semantics and DIO mapping), but even doubling that figure is +6 KB against
   ~37 KB of flash headroom, so it is not a fit risk. `sx1276Regs-Fsk.h` is already
   in-tree, which helps.
-* **The DK is not the module.** RAK4600 exposes fewer GPIO, and its SX1276 DIO
-  lines are routed internally -- the design here depends on a DIO interrupt for
-  FifoNotEmpty, so which DIOs reach the nRF52832 needs checking in the datasheet.
-  Without one, receive falls back to SPI polling, which is what made the legacy
-  firmware block for seconds.
-* **Band variant.** RAK4600 ships in 868 and 915 flavours; the die is wideband but
-  the matching network is not. 916.5 MHz needs the 915 part.
+* **The DK is not the module** -- resolved against the datasheet in 19.5.
 * nRF52832 has no USB, which costs nothing here since the UART and USB console
   were already removed.
+
+### 19.5 Checked against the RAK4600 datasheet
+
+Two of the three open questions are now settled, one favourably, and a new
+requirement and a new constraint appeared.
+
+**DIO wiring: resolved, and it is fine.** DIO0-DIO4 are all routed to the MCU:
+
+| SX1276 | nRF52832 |
+|---|---|
+| SCK / MOSI / MISO / NSS | P0.07 / P0.05 / P0.06 / P0.04 |
+| DIO0 | P0.27 |
+| DIO1 | P0.28 |
+| DIO2 | P0.29 |
+| DIO3 | P0.30 |
+| DIO4 | P0.31 |
+| DIO5 | **NC** |
+
+Only DIO5 is unconnected, and nothing here needs it. The design's FifoNotEmpty-
+style interrupt has several candidate mappings available, so receive does **not**
+degrade to SPI polling. This was the one unknown that could have forced a design
+change, and it does not.
+
+**Band: fine.** The module datasheet gives 863-870 MHz (EU) / **902-928 MHz (US)**,
+and the US part covers 916.5 MHz.
+
+**NEW REQUIREMENT -- the RF switch.** The module has an antenna switch driven by
+`VCTL1` on **P0.16** and `VCTL2` on **P0.15**. The RFM69 has no such thing, so this
+is new driver work with no analogue in the current code: the TX/RX path must be
+switched with the radio mode. It is small, but getting it wrong means either no
+transmit or no receive, with the SPI link looking perfectly healthy throughout.
+
+**NEW CONSTRAINT -- almost no analog pin left.** Of the eight SAADC inputs, seven
+are consumed by the radio:
+
+```
+AIN0  P0.02   not exposed on the module
+AIN1  P0.03   ** the only exposed analog-capable pin **
+AIN2  P0.04   SX1276 NSS
+AIN3  P0.05   SX1276 MOSI
+AIN4  P0.28   SX1276 DIO1
+AIN5  P0.29   SX1276 DIO2
+AIN6  P0.30   SX1276 DIO3
+AIN7  P0.31   SX1276 DIO4
+```
+
+P0.03 is also the configured MCU reset pin. So battery sensing is possible, but it
+costs the hardware reset (reset is re-assignable via `UICR.PSELRESET`) -- or the
+battery monitor goes. Digital pins are not the problem; P0.18, P0.19, P0.12, P0.13,
+P0.09, P0.10, P0.14, P0.17, P0.22 and P0.23 are available for the LED and the rest.
+
+### 19.6 The one thing that decides it
+
+**Which nRF52832 variant is fitted.** Neither the module nor the breakout datasheet
+says, and it is the difference between comfortable and impossible:
+
+| variant | flash / RAM | verdict |
+|---|---|---|
+| **QFAA** | 512 KB / 64 KB | fits as measured in 19.2 -- 82.6% flash, 63.5% RAM trimmed, OTA intact |
+| **QFAB** | 256 KB / 32 KB | **does not fit** |
+
+For QFAB the RAM settles it on its own: measured usage is 50.4 KB as-is and 40.7 KB
+after trimming, against 32 KB available. Closing an 8.7 KB gap would mean cutting
+`BT_ATT_PREPARE_COUNT` and the ATT MTU, which are exactly the settings the
+AndroidAPS long-write path depends on. Flash is no better -- 175 KB against 92 KB
+per slot in a dual-slot layout, and 95% of a single 184 KB slot with OTA given up.
+
+**Confirm QFAA before buying anything.** Everything else here is tractable work;
+this one is binary.
