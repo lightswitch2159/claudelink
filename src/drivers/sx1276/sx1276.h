@@ -77,6 +77,35 @@ int sx1276_set_power_level(uint8_t level);
 bool sx1276_packet_sent(void);
 bool sx1276_sync_matched(void);
 
+/**
+ * @brief Enable the receive-trigger interrupt, giving @p sem when it fires.
+ *
+ * DIO2 / SyncAddressMatch, not a FIFO-level signal. The SX1276 has no
+ * FifoNotEmpty mapping (DIO1 offers only FifoLevel, FifoEmpty and FifoFull), so
+ * receive is keyed on the sync word matching instead of on the first byte
+ * landing. That is also the correct moment to latch RSSI -- see
+ * sx1276_latch_rssi().
+ */
+int sx1276_rx_irq_enable(struct k_sem *sem);
+int sx1276_rx_irq_disable(void);
+
+/**
+ * @brief Sample RSSI now and keep it for sx1276_read_rssi().
+ *
+ * Must be called while the carrier is still present -- i.e. at sync match, not
+ * after the FIFO has been drained. Reading it late measures the noise floor;
+ * see MIGRATION_NOTES 13.3.
+ */
+int sx1276_latch_rssi(void);
+
+/**
+ * @brief Sample RSSI repeatedly in RX and report the spread.
+ *
+ * A dead front end reads a constant value; a live one wanders. Boot-time
+ * liveness check, mirroring rf69_rssi_survey().
+ */
+int sx1276_rssi_survey(int16_t *min_dbm, int16_t *max_dbm);
+
 void sx1276_dump_regs(void);
 
 #ifdef __cplusplus

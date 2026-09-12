@@ -388,9 +388,80 @@ int sx1276_set_payload_len(uint8_t len)
 	return sx1276_write_reg(SX_REG_PAYLOADLENGTH, len);
 }
 
+int sx1276_latch_rssi(void)
+{
+	uint8_t raw = 0;
+	int err = sx1276_read_reg(SX_REG_RSSIVALUE, &raw);
+
+	if (err) {
+		return err;
+	}
+
+	/* RegRssiValue is -RssiValue/2 dBm on this part, where the SX1231 used
+	 * RssiValue/2 - 73. Different scale, same trap if sampled late.
+	 */
+	last_rssi_dbm = -(int16_t)(raw / 2);
+	return 0;
+}
+
 int16_t sx1276_read_rssi(void)
 {
 	return last_rssi_dbm;
+}
+
+/* ------------------------------------------------------------------------- *
+ * Receive trigger interrupt -- DIO2 / SyncAddressMatch
+ * ------------------------------------------------------------------------- */
+
+static struct gpio_callback dio2_cb_data;
+static struct k_sem *dio2_sem;
+
+static void dio2_handler(const struct device *port, struct gpio_callback *cb,
+			 gpio_port_pins_t pins)
+{
+	ARG_UNUSED(port);
+	ARG_UNUSED(cb);
+	ARG_UNUSED(pins);
+
+	if (dio2_sem) {
+		k_sem_give(dio2_sem);
+	}
+}
+
+int sx1276_rx_irq_enable(struct k_sem *sem)
+{
+	int err;
+
+	if (sx_dio2.port == NULL) {
+		return -ENODEV;
+	}
+
+	dio2_sem = sem;
+
+	err = gpio_pin_configure_dt(&sx_dio2, GPIO_INPUT);
+	if (err) {
+		return err;
+	}
+
+	gpio_init_callback(&dio2_cb_data, dio2_handler, BIT(sx_dio2.pin));
+	err = gpio_add_callback(sx_dio2.port, &dio2_cb_data);
+	if (err) {
+		return err;
+	}
+
+	return gpio_pin_interrupt_configure_dt(&sx_dio2, GPIO_INT_EDGE_TO_ACTIVE);
+}
+
+int sx1276_rx_irq_disable(void)
+{
+	if (sx_dio2.port == NULL) {
+		return -ENODEV;
+	}
+
+	gpio_pin_interrupt_configure_dt(&sx_dio2, GPIO_INT_DISABLE);
+	gpio_remove_callback(sx_dio2.port, &dio2_cb_data);
+	dio2_sem = NULL;
+	return 0;
 }
 
 /* ------------------------------------------------------------------------- *
@@ -518,6 +589,39 @@ void sx1276_selftest_report(const struct sx1276_selftest *r)
 	LOG_INF("%s frequency       reads %u Hz",
 		r->freq_ok ? "[PASS]" : "[FAIL]", r->freq_hz);
 	LOG_INF("---- %s ----", r->all_passed ? "ALL PASSED" : "FAILURES ABOVE");
+}
+
+int sx1276_rssi_survey(int16_t *min_dbm, int16_t *max_dbm)
+{
+	int16_t lo = INT16_MAX, hi = INT16_MIN;
+	int err;
+
+	err = sx1276_set_mode(SX1276_MODE_RX);
+	if (err) {
+		return err;
+	}
+
+	for (int i = 0; i < 24; i++) {
+		uint8_t raw = 0;
+
+		if (sx1276_read_reg(SX_REG_RSSIVALUE, &raw) == 0) {
+			int16_t dbm = -(int16_t)(raw / 2);
+
+			lo = MIN(lo, dbm);
+			hi = MAX(hi, dbm);
+		}
+		k_sleep(K_MSEC(1));
+	}
+
+	sx1276_set_mode(SX1276_MODE_SLEEP);
+
+	if (min_dbm) {
+		*min_dbm = lo;
+	}
+	if (max_dbm) {
+		*max_dbm = hi;
+	}
+	return (hi > lo) ? (hi - lo) : 0;
 }
 
 void sx1276_dump_regs(void)

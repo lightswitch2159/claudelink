@@ -8,8 +8,7 @@
 #include <string.h>
 
 #include "subg.h"
-#include "rf69.h"
-#include "rf69_registers.h"
+#include "radio.h"
 #include "4b6b.h"
 #include "manchester.h"
 
@@ -73,7 +72,7 @@ static K_SEM_DEFINE(dio1_sem, 0, 1);
 
 void subg_init(void)
 {
-	if (rf69_dio1_irq_enable(&dio1_sem) != 0) {
+	if (radio_rx_irq_enable(&dio1_sem) != 0) {
 		LOG_WRN("DIO1 interrupt unavailable; receive falls back to polling");
 	}
 	LOG_INF("sub-GHz ready (916 MHz Minimed, max %u B)", SUBG_MAX_PKT_LEN);
@@ -100,7 +99,7 @@ int16_t subg_get_last_rssi(void) { return last_rssi; }
 static bool wait_fifo_not_full(uint32_t timeout_ms)
 {
 	for (uint32_t i = 0; i < timeout_ms * 4; i++) {
-		if (!rf69_fifo_is_full()) {
+		if (!radio_fifo_is_full()) {
 			return true;
 		}
 		k_sleep(K_USEC(250));
@@ -118,10 +117,10 @@ static int minimed_tx(const uint8_t *data, uint8_t len)
 	uint32_t t_sb = 0, t_clr = 0, t_wr = 0, t_tx = 0, t_done = 0;
 	uint32_t c0 = k_cycle_get_32();
 
-	rf69_set_mode(RF69_MODE_STANDBY);
+	radio_set_mode(RADIO_MODE_STANDBY);
 	t_sb = k_cyc_to_us_floor32(k_cycle_get_32() - c0);
 	c0 = k_cycle_get_32();
-	rf69_fifo_clear();
+	radio_fifo_clear();
 	t_clr = k_cyc_to_us_floor32(k_cycle_get_32() - c0);
 
 	/*
@@ -152,22 +151,22 @@ static int minimed_tx(const uint8_t *data, uint8_t len)
 #endif
 
 	/* Prime the FIFO, then stream the remainder as it drains. */
-	sent = MIN(len, RF69_FIFO_SIZE);
+	sent = MIN(len, RADIO_FIFO_SIZE);
 	c0 = k_cycle_get_32();
-	if (rf69_fifo_write(data, sent) != 0) {
+	if (radio_fifo_write(data, sent) != 0) {
 		return -EIO;
 	}
 	t_wr = k_cyc_to_us_floor32(k_cycle_get_32() - c0);
 
 	c0 = k_cycle_get_32();
-	rf69_set_mode(RF69_MODE_TX);
+	radio_set_mode(RADIO_MODE_TX);
 	t_tx = k_cyc_to_us_floor32(k_cycle_get_32() - c0);
 
 	while (sent < len) {
 		if (!wait_fifo_not_full(SUBG_TX_FIFO_WAIT_MS)) {
 			return -ETIMEDOUT;
 		}
-		if (rf69_fifo_write_byte(data[sent]) != 0) {
+		if (radio_fifo_write_byte(data[sent]) != 0) {
 			return -EIO;
 		}
 		sent++;
@@ -175,7 +174,7 @@ static int minimed_tx(const uint8_t *data, uint8_t len)
 
 	/* Zero terminator -- the far end stops here. See the note in subg.h. */
 	if (wait_fifo_not_full(SUBG_TX_FIFO_WAIT_MS)) {
-		rf69_fifo_write_byte(0x00);
+		radio_fifo_write_byte(0x00);
 	}
 
 	/*
@@ -189,12 +188,12 @@ static int minimed_tx(const uint8_t *data, uint8_t len)
 #if defined(CONFIG_ORANGELINK_TX_LEGACY_TRUNCATE)
 	/* Legacy: wait for the FIFO to drain, then cut the transmission short. */
 	for (int i = 0; i < SUBG_TX_DONE_WAIT_MS; i++) {
-		if (rf69_fifo_is_empty()) {
+		if (radio_fifo_is_empty()) {
 			break;
 		}
 		k_sleep(K_MSEC(1));
 	}
-	rf69_set_mode(RF69_MODE_STANDBY);
+	radio_set_mode(RADIO_MODE_STANDBY);
 	return 0;
 #else
 	/*
@@ -208,7 +207,7 @@ static int minimed_tx(const uint8_t *data, uint8_t len)
 	 */
 	c0 = k_cycle_get_32();
 	for (int i = 0; i < SUBG_TX_DONE_WAIT_MS; i++) {
-		if (rf69_fifo_is_empty()) {
+		if (radio_fifo_is_empty()) {
 			t_done = k_cyc_to_us_floor32(k_cycle_get_32() - c0);
 			if (tx_profile_frame) {
 				tx_profile_frame = false;
@@ -242,12 +241,12 @@ static int minimed_tx(const uint8_t *data, uint8_t len)
  */
 static int minimed_tx_repeat(const uint8_t *data, uint8_t len, unsigned int frames)
 {
-	uint8_t frame[RF69_FIFO_SIZE];
+	uint8_t frame[RADIO_FIFO_SIZE];
 	uint8_t flen = len + 1;            /* payload + zero terminator */
 	uint32_t total, written = 0;
 	int64_t deadline;
 
-	if (flen > RF69_FIFO_SIZE || frames == 0) {
+	if (flen > RADIO_FIFO_SIZE || frames == 0) {
 		return -EINVAL;
 	}
 
@@ -255,19 +254,19 @@ static int minimed_tx_repeat(const uint8_t *data, uint8_t len, unsigned int fram
 	frame[len] = 0x00;
 	total = (uint32_t)flen * frames;
 
-	rf69_set_mode(RF69_MODE_STANDBY);
-	rf69_fifo_clear();
-	rf69_set_payload_len(flen);
+	radio_set_mode(RADIO_MODE_STANDBY);
+	radio_fifo_clear();
+	radio_set_payload_len(flen);
 
 	/* Prime with whole frames only, so packet boundaries stay aligned. */
-	while (written + flen <= RF69_FIFO_SIZE && written < total) {
-		if (rf69_fifo_write(frame, flen) != 0) {
+	while (written + flen <= RADIO_FIFO_SIZE && written < total) {
+		if (radio_fifo_write(frame, flen) != 0) {
 			return -EIO;
 		}
 		written += flen;
 	}
 
-	rf69_set_mode(RF69_MODE_TX);
+	radio_set_mode(RADIO_MODE_TX);
 
 	/* Refill as it drains. Bounded so a stalled radio cannot hang the thread. */
 	deadline = k_uptime_get() + (int64_t)frames * 50 + 1000;
@@ -276,11 +275,11 @@ static int minimed_tx_repeat(const uint8_t *data, uint8_t len, unsigned int fram
 			LOG_WRN("burst stalled at %u/%u bytes", written, total);
 			break;
 		}
-		if (rf69_fifo_is_full()) {
+		if (radio_fifo_is_full()) {
 			k_sleep(K_USEC(SUBG_TX_POLL_US));
 			continue;
 		}
-		if (rf69_fifo_write_byte(frame[written % flen]) != 0) {
+		if (radio_fifo_write_byte(frame[written % flen]) != 0) {
 			return -EIO;
 		}
 		written++;
@@ -288,13 +287,13 @@ static int minimed_tx_repeat(const uint8_t *data, uint8_t len, unsigned int fram
 
 	/* Let the tail drain before leaving TX, or the last packets are cut off. */
 	for (int i = 0; i < SUBG_TX_DONE_WAIT_MS * (1000 / SUBG_TX_POLL_US); i++) {
-		if (rf69_fifo_is_empty()) {
+		if (radio_fifo_is_empty()) {
 			break;
 		}
 		k_sleep(K_USEC(SUBG_TX_POLL_US));
 	}
 	k_sleep(K_MSEC(2));   /* final packet still being clocked out */
-	rf69_set_mode(RF69_MODE_SLEEP);
+	radio_set_mode(RADIO_MODE_SLEEP);
 
 	return (written == total) ? 0 : -EIO;
 }
@@ -312,8 +311,8 @@ int subg_send_pkt(const uint8_t *data, uint8_t len, uint8_t repeat_cnt,
 
 	/* Once per burst, as in legacy Subg_SendPkt(). */
 	tx_profile_frame = true;
-	rf69_set_mode(RF69_MODE_STANDBY);
-	rf69_set_payload_len(len + 1);
+	radio_set_mode(RADIO_MODE_STANDBY);
+	radio_set_payload_len(len + 1);
 
 	/*
 	 * A repeat burst must not be abandoned on a single failed frame.
@@ -401,7 +400,7 @@ int subg_send_pkt(const uint8_t *data, uint8_t len, uint8_t repeat_cnt,
 	 * after the repeat loop rather than after each frame. See the note in
 	 * subg_get_pkt() for why SLEEP and not STANDBY.
 	 */
-	rf69_set_mode(RF69_MODE_SLEEP);
+	radio_set_mode(RADIO_MODE_SLEEP);
 
 	/* Succeed if anything at all went out; a partial burst can still wake. */
 	return (sent > 0) ? 0 : -EIO;
@@ -432,8 +431,8 @@ enum subg_rx_status subg_get_pkt(uint8_t *buf, uint8_t *len, uint32_t timeout_ms
 	 * been cut short. The dispatcher clears it instead -- legacy
 	 * Subg_ClrIntFlg(), called once before running a command.
 	 */
-	rf69_set_mode(RF69_MODE_STANDBY);
-	rf69_set_payload_len(SUBG_MAX_PKT_LEN);
+	radio_set_mode(RADIO_MODE_STANDBY);
+	radio_set_payload_len(SUBG_MAX_PKT_LEN);
 
 	/*
 	 * Drain the FIFO before listening.
@@ -444,25 +443,25 @@ enum subg_rx_status subg_get_pkt(uint8_t *buf, uint8_t *len, uint32_t timeout_ms
 	 * immediately. Against AndroidAPS that looked like every 4000 ms
 	 * send-and-listen completing instantly with nothing heard.
 	 */
-	rf69_fifo_clear();
-	while (!rf69_fifo_is_empty()) {
+	radio_fifo_clear();
+	while (!radio_fifo_is_empty()) {
 		uint8_t stale;
 
-		if (rf69_fifo_read_byte(&stale) != 0) {
+		if (radio_fifo_read_byte(&stale) != 0) {
 			break;
 		}
 	}
 
 	/* Clear any edge left over from a previous receive. */
 	k_sem_reset(&dio1_sem);
-	rf69_set_mode(RF69_MODE_RX);
+	radio_set_mode(RADIO_MODE_RX);
 
 	start = k_uptime_get();
 
 	rssi_latched = false;
 
 	while (true) {
-		if (!rf69_fifo_is_empty()) {
+		if (!radio_fifo_is_empty()) {
 			/*
 			 * Latch RSSI on the first byte of the packet, while the carrier is
 			 * still present.
@@ -479,11 +478,11 @@ enum subg_rx_status subg_get_pkt(uint8_t *buf, uint8_t *len, uint32_t timeout_ms
 			 * floor reading on half the replies makes the ranking meaningless.
 			 */
 			if (!rssi_latched) {
-				last_rssi = rf69_read_rssi(false);
+				last_rssi = radio_sample_rssi();
 				rssi_latched = true;
 			}
 
-			if (rf69_fifo_read_byte(&b) != 0) {
+			if (radio_fifo_read_byte(&b) != 0) {
 				break;
 			}
 
@@ -501,12 +500,12 @@ enum subg_rx_status subg_get_pkt(uint8_t *buf, uint8_t *len, uint32_t timeout_ms
 		}
 
 		if (abort_flag) {
-			rf69_set_mode(RF69_MODE_SLEEP);
+			radio_set_mode(RADIO_MODE_SLEEP);
 			return SUBG_RX_INTERRUPTED;
 		}
 
 		if (timeout_ms > 0 && (k_uptime_get() - start) > (int64_t)timeout_ms) {
-			rf69_set_mode(RF69_MODE_SLEEP);
+			radio_set_mode(RADIO_MODE_SLEEP);
 			return SUBG_RX_TIMEOUT;
 		}
 
@@ -529,7 +528,7 @@ enum subg_rx_status subg_get_pkt(uint8_t *buf, uint8_t *len, uint32_t timeout_ms
 	 * SLEEP, not STANDBY, once the receive is over.
 	 *
 	 * Legacy's Subg_GetPkt() and Subg_SendPkt() both end in rf_stop(), which
-	 * sets RF69_MODE_SLEEP, and Rf69_DevParaCfg() leaves the radio asleep at
+	 * sets RADIO_MODE_SLEEP, and Rf69_DevParaCfg() leaves the radio asleep at
 	 * init. This port left it in STANDBY on every path, so the RFM69 was awake
 	 * permanently -- datasheet-typical 1.25 mA against 0.1 uA asleep, which on
 	 * this board swamps everything else in the idle budget.
@@ -537,7 +536,7 @@ enum subg_rx_status subg_get_pkt(uint8_t *buf, uint8_t *len, uint32_t timeout_ms
 	 * SPI still works in sleep, so deferred register writes (apply_pending_freq)
 	 * do not need the radio woken first.
 	 */
-	rf69_set_mode(RF69_MODE_SLEEP);
+	radio_set_mode(RADIO_MODE_SLEEP);
 
 	/*
 	 * Legacy returned SUBG_RX_OK even when count was 0, leaving *pRxLen
@@ -569,15 +568,15 @@ static bool fifo_roundtrip(const uint8_t *src, uint16_t len, uint16_t *matched)
 	uint8_t back;
 	uint16_t ok = 0;
 
-	rf69_set_mode(RF69_MODE_STANDBY);
-	rf69_fifo_clear();
+	radio_set_mode(RADIO_MODE_STANDBY);
+	radio_fifo_clear();
 
-	if (rf69_fifo_write(src, len) != 0) {
+	if (radio_fifo_write(src, len) != 0) {
 		return false;
 	}
 
 	for (uint16_t i = 0; i < len; i++) {
-		if (rf69_fifo_read_byte(&back) != 0) {
+		if (radio_fifo_read_byte(&back) != 0) {
 			break;
 		}
 		if (back == src[i]) {
@@ -624,13 +623,13 @@ static bool datapath_roundtrip(int encoding)
 		return false;
 	}
 
-	rf69_set_mode(RF69_MODE_STANDBY);
-	rf69_fifo_clear();
-	if (rf69_fifo_write(enc, enc_len) != 0) {
+	radio_set_mode(RADIO_MODE_STANDBY);
+	radio_fifo_clear();
+	if (radio_fifo_write(enc, enc_len) != 0) {
 		return false;
 	}
 	for (uint16_t i = 0; i < enc_len; i++) {
-		if (rf69_fifo_read_byte(&back[i]) != 0) {
+		if (radio_fifo_read_byte(&back[i]) != 0) {
 			return false;
 		}
 	}
@@ -665,11 +664,11 @@ int subg_loopback_run(struct subg_loopback *out)
 	uint8_t b;
 
 	/* Stage 1: single byte through the FIFO. */
-	rf69_set_mode(RF69_MODE_STANDBY);
-	rf69_fifo_clear();
+	radio_set_mode(RADIO_MODE_STANDBY);
+	radio_fifo_clear();
 	r.fifo_byte_wrote = 0x5C;
-	if (rf69_fifo_write_byte(r.fifo_byte_wrote) == 0 &&
-	    rf69_fifo_read_byte(&r.fifo_byte_read) == 0) {
+	if (radio_fifo_write_byte(r.fifo_byte_wrote) == 0 &&
+	    radio_fifo_read_byte(&r.fifo_byte_read) == 0) {
 		r.fifo_byte = (r.fifo_byte_read == r.fifo_byte_wrote);
 	}
 
@@ -678,12 +677,12 @@ int subg_loopback_run(struct subg_loopback *out)
 	r.fifo_burst = fifo_roundtrip(burst, sizeof(burst), &r.burst_matched);
 
 	/* Stage 3: do the status flags actually track FIFO content? */
-	rf69_fifo_clear();
-	bool empty_when_cleared = rf69_fifo_is_empty();
-	rf69_fifo_write_byte(0x42);
-	bool not_empty_after_write = !rf69_fifo_is_empty();
-	rf69_fifo_read_byte(&b);
-	bool empty_after_drain = rf69_fifo_is_empty();
+	radio_fifo_clear();
+	bool empty_when_cleared = radio_fifo_is_empty();
+	radio_fifo_write_byte(0x42);
+	bool not_empty_after_write = !radio_fifo_is_empty();
+	radio_fifo_read_byte(&b);
+	bool empty_after_drain = radio_fifo_is_empty();
 	r.flags_track = empty_when_cleared && not_empty_after_write && empty_after_drain;
 
 	/* Stage 4: the real encode/decode chain through hardware. */
@@ -698,17 +697,17 @@ int subg_loopback_run(struct subg_loopback *out)
 	 * the interrupt with the FIFO empty, push one byte, and the empty->non-empty
 	 * edge must wake the semaphore. This is what caught DIO1 being unconnected.
 	 */
-	rf69_set_mode(RF69_MODE_STANDBY);
-	rf69_fifo_clear();
-	while (!rf69_fifo_is_empty()) {
-		if (rf69_fifo_read_byte(&b) != 0) {
+	radio_set_mode(RADIO_MODE_STANDBY);
+	radio_fifo_clear();
+	while (!radio_fifo_is_empty()) {
+		if (radio_fifo_read_byte(&b) != 0) {
 			break;
 		}
 	}
 	k_sem_reset(&dio1_sem);
-	rf69_fifo_write_byte(0x5A);
+	radio_fifo_write_byte(0x5A);
 	r.dio1_irq_fired = (k_sem_take(&dio1_sem, K_MSEC(50)) == 0);
-	rf69_fifo_clear();
+	radio_fifo_clear();
 
 	/*
 	 * Stage 6: TX completes, exercising the real subg_send_pkt() path.
@@ -723,7 +722,7 @@ int subg_loopback_run(struct subg_loopback *out)
 	 * risks damaging it, and this runs with whatever antenna happens to be
 	 * fitted. -18 dBm also keeps radiated output negligible.
 	 */
-	rf69_set_power_level(SUBG_PA_LEVEL_MIN);
+	radio_set_power_level(SUBG_PA_LEVEL_MIN);
 	{
 		static const uint8_t probe[] = { 0xA7, 0x01, 0x02, 0x03 };
 		int64_t t0 = k_uptime_get();
@@ -731,11 +730,11 @@ int subg_loopback_run(struct subg_loopback *out)
 		r.tx_packet_sent = (subg_send_pkt(probe, sizeof(probe), 0, 0) == 0);
 		r.tx_wait_us = (uint32_t)((k_uptime_get() - t0) * 1000);
 	}
-	rf69_set_power_level(SUBG_PA_LEVEL_DEFAULT);
+	radio_set_power_level(SUBG_PA_LEVEL_DEFAULT);
 
 	/* Restore a known-good state for normal operation. */
-	rf69_config_916();
-	rf69_set_mode(RF69_MODE_STANDBY);
+	radio_config_916();
+	radio_set_mode(RADIO_MODE_STANDBY);
 
 	r.all_passed = r.fifo_byte && r.fifo_burst && r.flags_track &&
 		       r.datapath_none && r.datapath_manchester &&
@@ -748,7 +747,7 @@ int subg_loopback_run(struct subg_loopback *out)
 	 * Without this the boot-time register dump reports STANDBY and the
 	 * "asleep at idle" invariant is unverifiable from the log.
 	 */
-	rf69_set_mode(RF69_MODE_SLEEP);
+	radio_set_mode(RADIO_MODE_SLEEP);
 
 	return r.all_passed ? 0 : -EIO;
 }
@@ -784,11 +783,11 @@ void subg_loopback_report(const struct subg_loopback *r)
 	LOG_INF("note: loopback proves FIFO and encoding, NOT receiver sensitivity");
 	LOG_INF("      or interoperability -- those need the Minimed 722.");
 
-	rf69_dump_regs();
+	radio_dump_regs();
 
 	{
 		int16_t lo = 0, hi = 0;
-		int spread = rf69_rssi_survey(&lo, &hi);
+		int spread = radio_rssi_survey(&lo, &hi);
 
 		LOG_INF("---- RSSI survey (24 samples in RX) ----");
 		LOG_INF("  min=%d dBm  max=%d dBm  spread=%d dB", lo, hi, spread);

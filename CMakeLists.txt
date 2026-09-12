@@ -27,7 +27,7 @@ if(CONFIG_ORANGELINK_BATTERY)
 endif()
 
 target_include_directories(app PRIVATE src src/encoding src/drivers/rf69 src/aps src/subg
-                           src/indication src/battery src/drivers/sx1276)
+                           src/indication src/battery src/drivers src/drivers/sx1276)
 
 # Phase 3/4 will add:
 #   src/aps/       <- legacy/project/app/src/app_aps.c
