@@ -13,7 +13,7 @@
  *   MOSI           MOSI          P0.13      "
  *   MISO           MISO          P0.14      "
  *   CS   (NSS)     P0.11         P0.11      jumper CS here
- *   DIO1           P0.07         P0.07      SOLDER A WIRE -- see below
+ *   DIO1           P0.15         P0.15      SOLDER A WIRE -- see below
  *   RST            -             -          unused; the driver never asserts it
  *
  * DIO1 is not optional. The receive path waits on FifoNotEmpty via DIO1; the
@@ -100,6 +100,6 @@
 		reg = <0>;
 		spi-max-frequency = <4000000>;
 		band = "916";
-		dio1-gpios = <&gpio0 7 GPIO_ACTIVE_HIGH>;   /* P0.07 -> RFM69 DIO1 */
+		dio1-gpios = <&gpio0 15 GPIO_ACTIVE_HIGH>;  /* P0.15 -> RFM69 DIO1 */
 	};
 };

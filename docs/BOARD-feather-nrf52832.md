@@ -21,7 +21,7 @@ not defaults:
 | MOSI | MOSI | P0.13 | " |
 | MISO | MISO | P0.14 | " |
 | CS (NSS) | P0.11 | P0.11 | **jumper CS here** |
-| DIO1 | P0.07 | P0.07 | **solder a wire** |
+| DIO1 | P0.15 | P0.15 | **solder a wire** |
 | RST | — | — | unused; the driver never asserts it |
 
 **DIO1 is not optional.** The receive path waits on FifoNotEmpty via DIO1. The
