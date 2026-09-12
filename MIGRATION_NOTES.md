@@ -1,12 +1,29 @@
 # Migration Notes
 
-Every intended or discovered deviation from the original firmware's behaviour.
-Living document — append as porting proceeds.
+Every intended or discovered deviation from the original firmware's behaviour,
+and the reasoning behind each one.
 
-**Phase 0 status: no code ported, so no behavioural deviations exist yet.**
-Everything below is either a *planned* deviation (with rationale) or a
-*discrepancy found* between the migration brief, the scoping document, and what
-the source actually does.
+**Status: complete and verified on hardware.** This branch targets the Adafruit
+Feather nRF52832 (product 3406) with an RFM69HCW Radio FeatherWing, alongside the
+XIAO nRF52840 build on `xiao-nrf52840-sense`.
+
+Differences from the XIAO branch, all deliberate and documented in
+`docs/BOARD-feather-nrf52832.md`:
+
+* Keeps the **stock Adafruit bootloader** instead of installing MCUboot, so updates
+  go over USB serial DFU or BLE OTA -- both verified working -- and a bad image
+  never costs you the recovery path. No MCUboot means no SMP/mcumgr DFU.
+* Only two LEDs (red, blue -- no green), so the battery indicator's "green" is blue
+  and "yellow" is red+blue.
+* Battery divider calibrated empirically at 3.86 V. The 43% error this corrects is
+  **unexplained** and the calibration is single-point, so linearity is unverified.
+
+The RF self-test passes (`VERSION = 0x24`, FIFO and 4b6b datapath, DIO1 interrupt
+on P0.07, TX completion) and the radio sleeps between operations.
+
+Sections 1-2 record what was found *before* any code was written. Everything from
+section 3 onward is implemented and tested, and several sections exist specifically
+to record where an earlier conclusion in this document turned out to be wrong.
 
 
 > **A note on `tools/` and the pump serial.** This repository is published without
@@ -95,9 +112,10 @@ name and two indication toggles. Document it in release notes; skip the tool.
 
 ---
 
-## 2. Planned deviations from original behaviour
+## 2. Deliberate deviations from original behaviour
 
-Deliberate changes. Each needs sign-off before Phase 4 completes.
+Decided in advance, before porting began. All of these are now implemented; where
+one later proved wrong or needed revisiting, a later section says so.
 
 ### 2.1 Bounds checking added to all three command parsers — REQUIRED
 
