@@ -62,7 +62,15 @@
 		 */
 		zephyr,gain = "ADC_GAIN_1_6";
 		zephyr,reference = "ADC_REF_INTERNAL";
-		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		/*
+		 * 40 us, not the 10 us default. The 100k/100k divider presents ~50 kOhm
+		 * source impedance, and the SAADC needs a longer acquisition window to
+		 * settle at that level -- Nordic specify 40 us for sources in this range.
+		 * With the default the reading came out 1.43x high: last_mv read 5526 mV
+		 * against a cell measured at 3860 mV, with a raw count of ~3143/4095 so
+		 * it was not clipping.
+		 */
+		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS, 40)>;
 		zephyr,input-positive = <NRF_SAADC_AIN7>;
 		zephyr,resolution = <12>;
 		zephyr,oversampling = <4>;

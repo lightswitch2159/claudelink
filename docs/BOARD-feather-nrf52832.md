@@ -92,3 +92,60 @@ Double-tap reset first to enter the bootloader.
 2. **That the stock bootloader is still present.** If this Feather has had Zephyr
    or MCUboot flashed onto it before, the bootloader may already be gone — and
    restoring it needs one SWD flash of Adafruit's release.
+
+## Battery calibration
+
+Calibrated against a cell measured at **3.86 V**:
+
+```
+CONFIG_ORANGELINK_BATTERY_OUTPUT_OHMS=100000
+CONFIG_ORANGELINK_BATTERY_FULL_OHMS=139300     # nominal would be 200000
+```
+
+Result: `last_mv = 3857 mV`, `last_percent = 56%` — within 0.1% of the meter.
+
+**The 43% error this corrects is unexplained**, and that matters more than the fix.
+The nominal ratio of 2.0 is right per the board spec, and the configuration was
+verified in the generated devicetree:
+
+```
+reg = 0x7, zephyr,input-positive = 0x7   -> AIN7 / P0.31
+zephyr,gain = ADC_GAIN_1_6, ref INTERNAL -> 3600 mV full scale
+zephyr,resolution = 0xc                  -> 12-bit
+```
+
+A 3.86 V cell should give 1930 mV at the pin and a raw count near 2195 of 4095.
+Instead the firmware derived 5542 mV, implying ~3152 raw — high, but **not
+clipping**, so saturation is ruled out. Raising the acquisition time to 40 us for
+the ~50 kOhm source impedance (Nordic's guidance for that range) changed nothing:
+5526 mV before, 5542 mV after.
+
+43% is far too large for resistor tolerance, so a systematic factor is at work that
+has not been identified. Consequences to keep in mind:
+
+* This is a **single-point** calibration. Linearity has not been checked, so the
+  reading may drift at other voltages. Verify against a meter at a second point --
+  ideally near 3.5 V and near 4.1 V -- before trusting the percentage.
+* If the cause is later found (a different reference, an unexpected gain, or a
+  divider that is not what the spec says), `FULL_OHMS` should go back to nominal
+  and the real fault be corrected instead.
+
+### Reading battery state without RTT
+
+RTT on this board reproducibly dies at `[00:00:01.119` -- exactly when the first
+battery sample runs (`BATTERY_FIRST_SAMPLE_DELAY_MS = 1100`), also unexplained.
+The values can be read straight out of RAM over SWD instead, which is reliable:
+
+```bash
+E=build/orangelink-ncs/zephyr/zephyr.elf
+MV=$(nm $E | awk '/ last_mv$/{print $1}')
+PC=$(nm $E | awk '/ last_percent$/{print $1}')
+pyocd commander -t nrf52832 -c "read16 0x$MV" -c "read8 0x$PC"
+```
+
+### SWD needs USB power
+
+SWD fails completely on this board when it runs on battery alone -- `Unexpected
+ACK '0'` at every clock rate and every connect mode -- and works on the first
+attempt with USB connected. Same lesson as the XIAO, where battery-only power broke
+long SWD transfers. **Plug in USB before debugging.**
