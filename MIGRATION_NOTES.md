@@ -8,6 +8,17 @@ Everything below is either a *planned* deviation (with rationale) or a
 *discrepancy found* between the migration brief, the scoping document, and what
 the source actually does.
 
+
+> **A note on `tools/` and the pump serial.** This repository is published without
+> the bench test scripts (`tools/*.py`) that the notes below refer to — they drove a
+> real insulin pump over BLE and are not useful without that hardware. The pump's
+> serial number has also been redacted to `REDACTED` throughout. References to
+> `tools/…` are kept because the findings they record — protocol bugs, encoding
+> mistakes, and what each test did or did not prove — are the point of these notes,
+> and several of those lessons were about the tooling being wrong rather than the
+> firmware.
+
+
 ---
 
 ## 1. Discrepancies between the brief and the source
