@@ -1,12 +1,23 @@
 # Migration Notes
 
-Every intended or discovered deviation from the original firmware's behaviour.
-Living document — append as porting proceeds.
+Every intended or discovered deviation from the original firmware's behaviour,
+and the reasoning behind each one.
 
-**Phase 0 status: no code ported, so no behavioural deviations exist yet.**
-Everything below is either a *planned* deviation (with rationale) or a
-*discrepancy found* between the migration brief, the scoping document, and what
-the source actually does.
+**Status: complete and verified on hardware.** The Orangelink firmware is ported
+from the nRF5 SDK to nRF Connect SDK v3.4.0 / Zephyr 4.4.0, running on a Seeed
+XIAO nRF52840 with an RFM69HCW at 916 MHz.
+
+Verified end to end against a real Minimed 722: AndroidAPS reads the pump model,
+settings and history, and a byte-identical replay of the AAPS command sequence
+gets replies on every attempt at -40 to -54 dBm. The RF self-test passes
+(`VERSION = 0x24`, FIFO and 4b6b datapath, DIO1 interrupt, TX completion), the
+radio sleeps between operations as the original did, and firmware updates go over
+BLE via SMP/mcumgr with MCUboot signed dual-slot images.
+
+Sections 1-2 record what was found *before* any code was written -- errors in the
+migration brief, and deviations decided in advance. Everything from section 3
+onward is implemented and tested, and several sections exist specifically to
+record where an earlier conclusion in this document turned out to be wrong.
 
 ---
 
@@ -84,9 +95,10 @@ name and two indication toggles. Document it in release notes; skip the tool.
 
 ---
 
-## 2. Planned deviations from original behaviour
+## 2. Deliberate deviations from original behaviour
 
-Deliberate changes. Each needs sign-off before Phase 4 completes.
+Decided in advance, before porting began. All of these are now implemented; where
+one later proved wrong or needed revisiting, a later section says so.
 
 ### 2.1 Bounds checking added to all three command parsers — REQUIRED
 
