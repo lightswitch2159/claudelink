@@ -2211,10 +2211,25 @@ sync.
   wake on noise every cycle; requiring SyncAddressMatch would mean holding the
   receiver on across preamble plus sync, which is the cost being avoided. Defaults
   are 3264 us idle / 1472 us receive = 31% duty, taking receive from 16 mA to ~5 mA
-  and the projection from 8.0 to ~12.9 days. **To validate:** flash, confirm the
-  reply rate stays 12/12 at the same range, then sweep `LISTEN_IDLE_US` upward and
-  find where replies start dropping -- that measures the real preamble margin
-  rather than trusting a single capture.
+  and the projection from 8.0 to ~12.9 days.
+
+  **Measured on the bench, and it holds.** Receive current fell from 17 mA to
+  **5.5 mA** (multimeter in series with the battery, back-to-back `CMD_GET_PKT`
+  with no transmit), against ~6 mA predicted. Reply rate stayed 12/12 with every
+  reply a full model response. Reworking the energy budget with the measured
+  figure gives 5.65 mA average and **~13.3 days, a 1.66x gain**.
+
+  Worth being clear about the failure mode, because it is better than it first
+  looks: a false RSSI trigger cannot corrupt a receive. `RF_SYNC_ON |
+  RF_SYNC_FIFOFILL_AUTO` means the FIFO only fills after a sync match, so noise
+  above the threshold merely leaves the part in RX for the rest of that window
+  (`ListenEnd = 00` having stopped Listen mode). In a noisy environment the
+  saving degrades toward continuous RX; the packet still arrives.
+
+  **Still default n**, for one reason only: the idle period is sized against a
+  preamble measured from one pump on one bench. Sweep `LISTEN_IDLE_US` upward
+  until replies start dropping to find the real margin before trusting it on any
+  other hardware.
 - **BLE drops during sustained wake bursts.** Seen in most soak runs. This would
   appear to AAPS as exactly the stalled commands visible in the captured logs.
 - **Battery percentage is fiction when no cell is fitted.** With the cell removed the
