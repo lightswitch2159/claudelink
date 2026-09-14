@@ -22,6 +22,10 @@ if(CONFIG_ORANGELINK_BATTERY)
   target_sources(app PRIVATE src/battery/battery.c)
 endif()
 
+if(CONFIG_ORANGELINK_BUTTONLESS_DFU)
+  target_sources(app PRIVATE src/dfu/legacy_dfu.c)
+endif()
+
 target_include_directories(app PRIVATE src src/encoding src/drivers/rf69 src/aps src/subg
                            src/indication src/battery)
 

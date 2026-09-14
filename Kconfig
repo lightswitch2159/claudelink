@@ -65,6 +65,28 @@ config ORANGELINK_RFM69_TX_DBM
 	  is derived from this and the PA stage above, so switching stage does not
 	  change what leaves the antenna -- only the current it costs.
 
+config ORANGELINK_BUTTONLESS_DFU
+	bool "Buttonless DFU trigger service (Adafruit bootloader)"
+	default n
+	depends on BT_PERIPHERAL
+	select REBOOT
+	help
+	  Exposes the Nordic legacy DFU service so an over-the-air update can be
+	  started from nRF Connect without touching the board.
+
+	  The Adafruit bootloader already supports OTA with no button -- it enters
+	  BLE DFU whenever GPREGRET holds 0xA8 or 0xB1 on reset. What it cannot do is
+	  put itself there; the running application has to. Without this, the only
+	  way in is a double-tap of the reset pin, which is useless once the board is
+	  in a case.
+
+	  Writing 0x01 to the control point reboots into the bootloader. That is a
+	  remotely triggerable reset on a device that talks to an insulin pump, so it
+	  is off by default and should be enabled deliberately. It requires an active
+	  connection and a notification subscription, but no pairing -- the legacy
+	  protocol has no authentication, and neither does the bootloader it hands
+	  off to.
+
 config ORANGELINK_RFM69_LISTEN
 	bool "Duty-cycle the receiver with RFM69 Listen Mode"
 	default n
