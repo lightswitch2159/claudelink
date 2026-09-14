@@ -368,14 +368,25 @@ int rf69_listen_start(void)
 	if (err) {
 		return err;
 	}
-	for (int i = 0; i < 50; i++) {
+
+	/*
+	 * Settle first, then check -- do not poll RcCalDone immediately.
+	 *
+	 * RcCalDone reads 1 at rest (it is its reset value, and the power-up
+	 * calibration leaves it set), so "poll until done" passes on the first read
+	 * against a stale flag and arms Listen while calibration is still running.
+	 * The datasheet gives no calibration duration, so wait a bounded period that
+	 * is generous against any plausible one and verify afterwards. At one
+	 * calibration per listen window this costs ~0.02% of the power budget.
+	 */
+	k_sleep(K_MSEC(2));
+	{
 		uint8_t osc1;
 
 		if (rf69_read_reg(REG_OSC1, &osc1) == 0 &&
-		    (osc1 & RF_OSC1_RCCAL_DONE)) {
-			break;
+		    !(osc1 & RF_OSC1_RCCAL_DONE)) {
+			LOG_WRN("RC calibration still running; listen timings may drift");
 		}
-		k_sleep(K_USEC(100));
 	}
 
 	err = rf69_write_reg(REG_LISTEN1, RF_LISTEN1_RESOL_IDLE_64 |
