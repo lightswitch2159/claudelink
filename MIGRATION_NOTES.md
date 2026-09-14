@@ -2201,7 +2201,20 @@ sync.
 
 ### Open items from this work
 
-- **Listen Mode is not implemented.** The measurements above say it is worth doing.
+- **Listen Mode is implemented but not validated on the bench.** It is opt-in
+  (`CONFIG_ORANGELINK_RFM69_LISTEN`, default n) because the idle period is set
+  against a preamble measured from one pump on one bench. `ListenEnd` is 00, not
+  the more obvious 01/10, because those end the receive on PayloadReady and this
+  driver runs fixed-length 255 with CRC off, so PayloadReady never fires -- packets
+  terminate on a zero byte in `subg_get_pkt()` instead. Acceptance is RSSI-only at
+  a threshold of 180 (-90 dBm) rather than the normal 228 (-114 dBm), which would
+  wake on noise every cycle; requiring SyncAddressMatch would mean holding the
+  receiver on across preamble plus sync, which is the cost being avoided. Defaults
+  are 3264 us idle / 1472 us receive = 31% duty, taking receive from 16 mA to ~5 mA
+  and the projection from 8.0 to ~12.9 days. **To validate:** flash, confirm the
+  reply rate stays 12/12 at the same range, then sweep `LISTEN_IDLE_US` upward and
+  find where replies start dropping -- that measures the real preamble margin
+  rather than trusting a single capture.
 - **BLE drops during sustained wake bursts.** Seen in most soak runs. This would
   appear to AAPS as exactly the stalled commands visible in the captured logs.
 - **Battery percentage is fiction when no cell is fitted.** With the cell removed the

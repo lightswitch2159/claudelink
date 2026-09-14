@@ -213,6 +213,9 @@ int rf69_set_mode(enum rf69_mode mode)
  * 4-byte sync word FF 00 FF 00. Values are unchanged from the legacy table.
  * ------------------------------------------------------------------------- */
 
+/* -114 dBm. The value rf69_cfg_916 installs, and what listen mode restores. */
+#define RF69_RSSITHRESH_DEFAULT 228
+
 static const uint8_t rf69_cfg_916[][2] = {
 	{ REG_OPMODE,        RF_OPMODE_SEQUENCER_ON | RF_OPMODE_LISTEN_OFF |
 			     RF_OPMODE_STANDBY },
@@ -232,7 +235,7 @@ static const uint8_t rf69_cfg_916[][2] = {
 	{ REG_DIOMAPPING1,   RF_DIOMAPPING1_DIO0_00 | RF_DIOMAPPING1_DIO1_10 },
 	{ REG_DIOMAPPING2,   RF_DIOMAPPING2_CLKOUT_OFF },
 	{ REG_IRQFLAGS2,     RF_IRQFLAGS2_FIFOOVERRUN },
-	{ REG_RSSITHRESH,    228 },
+	{ REG_RSSITHRESH,    RF69_RSSITHRESH_DEFAULT },
 	{ REG_PREAMBLEMSB,   RF_PREAMBLESIZE_MSB_VALUE },
 	{ REG_PREAMBLELSB,   RF_PREAMBLESIZE_LSB_VALUE },
 	{ REG_SYNCCONFIG,    RF_SYNC_ON | RF_SYNC_FIFOFILL_AUTO | RF_SYNC_SIZE_4 |
@@ -316,6 +319,98 @@ static int rf69_set_pa(void)
 
 	return rf69_write_reg(REG_PALEVEL, pa | (uint8_t)out);
 }
+
+#if defined(CONFIG_ORANGELINK_RFM69_LISTEN)
+/*
+ * Listen Mode: the radio alternates idle and receive on its own RC timer and only
+ * holds the receiver on when it sees something, without waking the host.
+ *
+ * ListenEnd is 00 ("stays in Rx, listen stops and must be disabled") rather than
+ * the more obvious 01/10, because both of those end the receive on PayloadReady --
+ * and this driver runs fixed-length 255 with CRC off, so PayloadReady never fires.
+ * Packets are terminated by a zero byte in subg_get_pkt() instead. With 00 the part
+ * simply stays in RX once triggered and the existing FIFO drain works unchanged.
+ *
+ * Acceptance is RSSI-only. Requiring SyncAddressMatch would mean keeping the
+ * receiver on across the preamble and the 4-byte sync to reach the decision, which
+ * is the cost this is meant to avoid.
+ */
+int rf69_listen_start(void)
+{
+	uint32_t idle = CONFIG_ORANGELINK_RFM69_LISTEN_IDLE_US / 64U;
+	uint32_t rx = CONFIG_ORANGELINK_RFM69_LISTEN_RX_US / 64U;
+	uint8_t opmode;
+	int err;
+
+	idle = CLAMP(idle, 1U, 255U);
+	rx = CLAMP(rx, 1U, 255U);
+
+	/* Datasheet 4.3: ListenOn is set from Standby. */
+	err = rf69_set_mode(RF69_MODE_STANDBY);
+	if (err) {
+		return err;
+	}
+
+	err = rf69_write_reg(REG_LISTEN1, RF_LISTEN1_RESOL_IDLE_64 |
+					  RF_LISTEN1_RESOL_RX_64 |
+					  RF_LISTEN1_CRITERIA_RSSI |
+					  RF_LISTEN1_END_00);
+	if (err) {
+		return err;
+	}
+	err = rf69_write_reg(REG_LISTEN2, (uint8_t)idle);
+	if (err) {
+		return err;
+	}
+	err = rf69_write_reg(REG_LISTEN3, (uint8_t)rx);
+	if (err) {
+		return err;
+	}
+	err = rf69_write_reg(REG_RSSITHRESH,
+			     CONFIG_ORANGELINK_RFM69_LISTEN_RSSI_THRESH);
+	if (err) {
+		return err;
+	}
+
+	err = rf69_read_reg(REG_OPMODE, &opmode);
+	if (err) {
+		return err;
+	}
+
+	/* Keep the sequencer bit, clear listen and mode, then listen from standby. */
+	return rf69_write_reg(REG_OPMODE, (opmode & 0x83) | RF_OPMODE_LISTEN_ON |
+					  RF_OPMODE_STANDBY);
+}
+
+/*
+ * Datasheet 4.3.4 requires exactly two writes to leave: ListenAbort set, then
+ * clear, each alongside the wanted Mode bits. One write is not enough and the
+ * part stays cycling.
+ */
+int rf69_listen_stop(void)
+{
+	uint8_t opmode;
+	int err;
+
+	err = rf69_read_reg(REG_OPMODE, &opmode);
+	if (err) {
+		return err;
+	}
+	opmode &= 0x83;
+
+	err = rf69_write_reg(REG_OPMODE,
+			     opmode | RF_OPMODE_LISTENABORT | RF_OPMODE_STANDBY);
+	if (err) {
+		return err;
+	}
+	err = rf69_write_reg(REG_OPMODE, opmode | RF_OPMODE_STANDBY);
+	if (err) {
+		return err;
+	}
+
+	return rf69_write_reg(REG_RSSITHRESH, RF69_RSSITHRESH_DEFAULT);
+}
+#endif /* CONFIG_ORANGELINK_RFM69_LISTEN */
 
 int rf69_config_916(void)
 {

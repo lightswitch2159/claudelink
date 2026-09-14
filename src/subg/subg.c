@@ -411,6 +411,36 @@ int subg_send_pkt(const uint8_t *data, uint8_t len, uint8_t repeat_cnt,
  * Receive
  * ------------------------------------------------------------------------- */
 
+/*
+ * Enter and leave the receive window.
+ *
+ * AndroidAPS owns the window LENGTH -- it arrives as a timeout in the command --
+ * but not what the radio does inside it. Continuous RX is ~16 mA for the whole
+ * window and, measured against real AAPS traffic, ~60% of all radio energy.
+ * Listen Mode duty-cycles the receiver in hardware and is invisible to the client.
+ *
+ * Falls back to continuous receive if listen mode cannot be entered, because a
+ * silent failure here looks exactly like a pump that stopped answering.
+ */
+static void subg_rx_begin(void)
+{
+#if defined(CONFIG_ORANGELINK_RFM69_LISTEN)
+	if (rf69_listen_start() == 0) {
+		return;
+	}
+	LOG_WRN("listen mode failed to start; using continuous RX");
+#endif
+	rf69_set_mode(RF69_MODE_RX);
+}
+
+static void subg_rx_end(void)
+{
+#if defined(CONFIG_ORANGELINK_RFM69_LISTEN)
+	rf69_listen_stop();
+#endif
+	rf69_set_mode(RF69_MODE_SLEEP);
+}
+
 enum subg_rx_status subg_get_pkt(uint8_t *buf, uint8_t *len, uint32_t timeout_ms)
 {
 	uint8_t count = 0;
@@ -455,7 +485,7 @@ enum subg_rx_status subg_get_pkt(uint8_t *buf, uint8_t *len, uint32_t timeout_ms
 
 	/* Clear any edge left over from a previous receive. */
 	k_sem_reset(&dio1_sem);
-	rf69_set_mode(RF69_MODE_RX);
+	subg_rx_begin();
 
 	start = k_uptime_get();
 
@@ -501,12 +531,12 @@ enum subg_rx_status subg_get_pkt(uint8_t *buf, uint8_t *len, uint32_t timeout_ms
 		}
 
 		if (abort_flag) {
-			rf69_set_mode(RF69_MODE_SLEEP);
+			subg_rx_end();
 			return SUBG_RX_INTERRUPTED;
 		}
 
 		if (timeout_ms > 0 && (k_uptime_get() - start) > (int64_t)timeout_ms) {
-			rf69_set_mode(RF69_MODE_SLEEP);
+			subg_rx_end();
 			return SUBG_RX_TIMEOUT;
 		}
 
@@ -537,7 +567,7 @@ enum subg_rx_status subg_get_pkt(uint8_t *buf, uint8_t *len, uint32_t timeout_ms
 	 * SPI still works in sleep, so deferred register writes (apply_pending_freq)
 	 * do not need the radio woken first.
 	 */
-	rf69_set_mode(RF69_MODE_SLEEP);
+	subg_rx_end();
 
 	/*
 	 * Legacy returned SUBG_RX_OK even when count was 0, leaving *pRxLen

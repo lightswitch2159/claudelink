@@ -149,6 +149,12 @@ bool rf69_fifo_is_full(void);
 int rf69_fifo_clear(void);
 int rf69_set_payload_len(uint8_t len);
 int rf69_set_power_level(uint8_t level);
+
+/** @brief Enter Listen Mode: hardware-duty-cycled receive. Standby entry only. */
+int rf69_listen_start(void);
+
+/** @brief Leave Listen Mode, ending in standby. Safe to call when not listening. */
+int rf69_listen_stop(void);
 bool rf69_packet_sent(void);
 
 /** @brief Log the registers that decide whether we actually radiate. */

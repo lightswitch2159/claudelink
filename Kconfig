@@ -65,6 +65,60 @@ config ORANGELINK_RFM69_TX_DBM
 	  is derived from this and the PA stage above, so switching stage does not
 	  change what leaves the antenna -- only the current it costs.
 
+config ORANGELINK_RFM69_LISTEN
+	bool "Duty-cycle the receiver with RFM69 Listen Mode"
+	default n
+	help
+	  AndroidAPS chooses how LONG we listen -- the timeout arrives in the
+	  command -- but not what the radio does during that window. By default
+	  subg_get_pkt() holds the receiver on continuously at ~16 mA for the whole
+	  window, and measured against real AAPS traffic that is ~60% of all radio
+	  energy.
+
+	  Listen Mode alternates idle and receive in hardware and only wakes the
+	  host on a hit, which is invisible to AAPS: same command, same window,
+	  same reply. The constraint is that the idle half must be shorter than the
+	  incoming preamble, or the receiver sleeps through it.
+
+	  A HackRF capture of a live exchange measured the pump's reply preamble at
+	  >= 91 bits (~5.55 ms), against the 16 bytes (7.81 ms) we transmit. The
+	  defaults below leave margin against that, but it is one pump on one bench
+	  -- sweep ORANGELINK_RFM69_LISTEN_IDLE_US upward and watch the reply rate
+	  before trusting it. See MIGRATION_NOTES.md section 21.
+
+config ORANGELINK_RFM69_LISTEN_IDLE_US
+	int "Listen Mode idle duration (us)"
+	depends on ORANGELINK_RFM69_LISTEN
+	default 3264
+	range 64 16320
+	help
+	  Rounded down to a multiple of 64 us. Must stay comfortably below the
+	  pump's reply preamble (~5550 us measured) with room for receiver wake-up
+	  and bit sync, or replies are missed.
+
+config ORANGELINK_RFM69_LISTEN_RX_US
+	int "Listen Mode receive duration (us)"
+	depends on ORANGELINK_RFM69_LISTEN
+	default 1472
+	range 64 16320
+	help
+	  Rounded down to a multiple of 64 us. Includes receiver start-up, so this
+	  cannot be trimmed to nothing -- too short and the RSSI decision is made
+	  before the front end has settled.
+
+config ORANGELINK_RFM69_LISTEN_RSSI_THRESH
+	int "RSSI threshold while listening (RegRssiThresh, -dBm x 2)"
+	depends on ORANGELINK_RFM69_LISTEN
+	default 180
+	range 0 255
+	help
+	  180 is -90 dBm. Acceptance uses RSSI alone rather than RSSI plus sync
+	  match, because requiring the sync word would mean holding the receiver on
+	  across the whole preamble and sync -- which is the cost being avoided.
+	  The normal threshold of 228 (-114 dBm) is far too sensitive for that and
+	  would wake on noise every cycle. Measured pump replies land at -60 to
+	  -70 dBm, so there is ample margin.
+
 config ORANGELINK_TX_LEGACY_TRUNCATE
 	bool "Transmit like the legacy firmware (fixed 255-byte frame, truncated)"
 	default n
