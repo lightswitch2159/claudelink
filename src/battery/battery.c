@@ -186,8 +186,17 @@ static int sample_millivolts(uint16_t *out_mv, int16_t *out_raw, int32_t *out_pi
 	 * float constant so it can be corrected by bench measurement without
 	 * touching code: measure the cell with a meter, compare against the mV this
 	 * logs, and scale FULL_OHMS.
+	 *
+	 * The intermediate MUST be 64-bit. This was a uint32_t and silently wrapped
+	 * once the Feather's real divider values went in: the XIAO's fudged 139300
+	 * survived (3600 * 139300 = 5.0e8), but the Rev G schematic's 2806000 does
+	 * not (3600 * 2806000 = 1.0e10 against a 4.29e9 ceiling). Every pin reading
+	 * above ~1530 mV wrapped, so a healthy cell always reported nonsense -- 0%
+	 * with the cell fitted, and a plausible-looking 73% without one. A BUILD_ASSERT
+	 * cannot express this alone, because the bound depends on the ADC full scale,
+	 * so the width is fixed here instead.
 	 */
-	*out_mv = (uint16_t)(((uint32_t)adc_mv * CONFIG_ORANGELINK_BATTERY_FULL_OHMS) /
+	*out_mv = (uint16_t)(((uint64_t)adc_mv * CONFIG_ORANGELINK_BATTERY_FULL_OHMS) /
 			     CONFIG_ORANGELINK_BATTERY_OUTPUT_OHMS);
 	*out_raw = raw;
 	*out_pin_mv = adc_mv;
