@@ -2055,3 +2055,161 @@ uses. So an SX127x port is closer to a translation of `rf69.c` than a design fro
 scratch, though the OOK demodulator has real controls the SX1231 lacks
 (`REG_OOKPEAK`, `REG_OOKFIX`, `REG_OOKAVG`, OOK bit-sync) which need tuning against
 a pump rather than assuming.
+
+## 21. Where the power actually goes: measured, and a PA theory that died
+
+Everything in this section replaces estimates with measurements. Three independent
+instruments were used because the first one lied.
+
+### What AndroidAPS actually asks for
+
+Two AAPS log captures (33 and 38 minutes of a live session) were decoded for RFSpy
+traffic. Requested listen timeouts are not what the radio does -- `subg_get_pkt()`
+returns the moment a packet arrives -- so both the requested and the real durations
+were measured by timing each command to its response:
+
+| timeout | count | requested | actual | mean |
+|---------|------:|----------:|-------:|-----:|
+| 1.25 s  |   169 |     211 s |  116 s | 0.69 s |
+| 2.00 s  |    14 |      28 s |    3 s | 0.25 s |
+| 4.00 s  |   115 |     460 s |  162 s | 1.41 s |
+| 25.00 s |    84 |    2100 s |  727 s | 8.65 s |
+|         |       |  **2799 s** | **1008 s** | |
+
+Requested timeouts imply 99% duty. Reality is **43.8%** (47.0% in the other
+capture). Sizing anything off the requested figures overestimates by 2.8x.
+
+Byte 3 of each command is the repeat count, and it is 200 on exactly the 84
+commands carrying the 25 s timeout -- the wake sequence. At 15.6 ms per frame that
+is 3.14 s of continuous airtime per wake, and 259 s of transmit across the session,
+leaving 749 s of genuine receive.
+
+### The currents
+
+Measured with a multimeter in series with the battery, USB disconnected (Q3
+disconnects the cell whenever USB is present, so a battery-side measurement reads
+zero with the cable in):
+
+| | measured | datasheet |
+|---|---------:|----------:|
+| idle (BLE connected, radio asleep) | < 150 uA | -- |
+| receive | **17 mA** | 16 mA + MCU |
+| transmit @ +13 dBm, PA1+PA2 | **33 mA** | -- |
+| transmit @ +13 dBm, PA1 only | **31 mA** | -- |
+
+Receive matches the datasheet to within a milliamp, which is what validates the
+method. Transmit does not, and the reason is structural: **`IDDT` assumes a
+continuous carrier.** OOK keys the PA off for every zero bit, and this link is
+exactly 50% ones -- every one of the 16 4b6b codewords in `encode_4b[]` has three
+ones in six bits, the preamble is 0xAA, and the sync is FF 00 FF 00. So:
+
+    continuous carrier @ +13 dBm    45 mA   (Table 4, PA0)
+    synthesiser alone (IDDFS)        9 mA   (runs continuously)
+      -> PA contribution            36 mA
+    OOK average = 9 + 0.5 x 36    = 27 mA
+    + nRF52832 with BLE up         ~2 mA   -> ~29 mA predicted, 31-33 measured
+
+**A USB power meter was tried first and was worthless** -- no resolution at idle,
+and it reported the PA comparison backwards (23 mA vs 25-27 mA, favouring the wrong
+configuration). Every conclusion drawn from it was wrong. It is recorded here only
+so the mistake is not repeated.
+
+### The PA experiment, and why it failed
+
+Fitting the datasheet's two PA_BOOST figures (+17 dBm/95 mA, +20 dBm/130 mA) gives
+~43% marginal efficiency over ~60 mA of fixed bias, predicting that +13 dBm costs
+74 mA on PA1+PA2 against ~45 mA on PA1 alone -- a 40% saving for a one-line change.
+
+It was built, flashed and measured. **PA1 alone is better by 6%, not 40%** -- 31 mA
+against 33 mA, worth about 0.2 days out of 8, while forfeiting all headroom above
++13 dBm. Link quality was identical (12/12 pump replies both ways). Default stays
+PA1+PA2.
+
+The fit was invalid because +20 dBm requires the high-power TESTPA registers, so the
+two points are in different operating modes and do not lie on one curve. And the
+whole premise was weaker than it looked: **OOK halves whatever PA difference
+exists**, because the PA is only energised half the time. PA-level optimisation is
+inherently worth half here what it would be on an FSK link.
+
+The Kconfig was restructured anyway: power is now expressed in dBm
+(`ORANGELINK_RFM69_TX_DBM`) with an explicit PA stage choice, so switching stage
+cannot silently change what leaves the antenna -- which the old raw-OutputPower
+field made easy, since the two stages use different power formulas.
+
+### Where the energy goes
+
+    RX    749 s x 17 mA  = 12,733 mA*s    60%
+    TX    259 s x 33 mA  =  8,547 mA*s    38%
+    idle 2301 s x 0.15   =     345 mA*s     2%
+                           ------------
+                           21,625 mA*s / 2301 s = 9.4 mA  ->  ~8.0 days on 1800 mAh
+
+**Receive dominates.** An earlier draft of this section claimed the opposite, on the
+strength of the 74 mA transmit figure; that was wrong. The lever is receive duty
+cycling, not the PA.
+
+### The pump's reply preamble, measured with a HackRF
+
+`subg_get_pkt()` holds the receiver on continuously for a window whose length AAPS
+chooses. The RFM69's hardware Listen Mode (`RegListen1/2/3`) can duty-cycle the
+receiver inside that window invisibly to AAPS -- provided the idle half is shorter
+than the incoming preamble.
+
+Our preamble is 16 bytes (`RF_PREAMBLESIZE = 0x0010`). **The pump's is not
+documented anywhere**, and structurally so: every open implementation sync-word
+hunts rather than requiring a preamble. `ps2/subg_rfspy` sets `PKTCTRL1 = 0x00`, so
+the CC1101's preamble quality threshold is zero; `ps2/rtlmm` squelches then shifts
+bits against `0xff00ff00`. Nobody had to characterise it, so nobody did. Our own
+hardware cannot see it either -- with `RF_SYNC_ON | RF_SYNC_FIFOFILL_AUTO` the
+preamble is consumed by bit sync and never reaches the FIFO.
+
+So it was captured directly: HackRF One at 916.1 MHz (500 kHz low, to keep the
+signal off DC), 2 Msps, during a live pump exchange. Demodulated as OOK with the
+bit rate taken as known (16384 bps) and only phase recovered -- estimating the rate
+quantises the symbol period to whole samples, drifts ~2 bits per frame and destroys
+the sync search.
+
+| | preamble | duration |
+|---|---------:|---------:|
+| our transmission | 128 bits / 16.0 bytes | 7.81 ms |
+| pump's reply | >= 91 bits / ~11.4 bytes | ~5.55 ms |
+
+Our figure coming out at exactly 128 bits is what validates the demodulator. The
+pump's 91 is a **lower bound** -- the count walks back from the sync word and stops
+at the first non-alternating pair, so one noisy bit at the weak leading edge
+truncates it; the true value is probably 96 bits (12 bytes, 5.86 ms).
+
+All four replies were identical and each arrived a consistent **+73.4 ms** after the
+transmission, which suggests the receiver could stay asleep for the first ~70 ms of
+every listen window.
+
+### What Listen Mode would be worth
+
+Against a ~5.5 ms preamble, 4 ms idle + 1 ms receive is a 20% duty cycle, taking
+receive from 16 mA to ~3.2 mA effective:
+
+| | average | battery |
+|---|--------:|--------:|
+| today | 9.4 mA | 8.0 days |
+| with Listen Mode | 5.2 mA | **~14 days** |
+| EFR32FG28 migration | 4.7 mA | ~16 days |
+
+**~1.8x for a register block, against ~2x for a full platform migration.** Note that
+RSSI-threshold triggering is unreliable with OOK; Listen Mode should trigger on
+SyncAddressMatch, which requires the receive window to span preamble plus the 4-byte
+sync.
+
+### Open items from this work
+
+- **Listen Mode is not implemented.** The measurements above say it is worth doing.
+- **BLE drops during sustained wake bursts.** Seen in most soak runs. This would
+  appear to AAPS as exactly the stalled commands visible in the captured logs.
+- **Battery percentage is fiction when no cell is fitted.** With the cell removed the
+  sense node is pulled to ground through R6 (2 MOhm) and reads 0%, but while the
+  MCP73831 is still driving VBAT it read a confident 73%. Neither is a measurement.
+  `battery.c` should detect the absence of a cell rather than report a number.
+- **`rf69_set_power_level()` is effectively dead.** Both calls are in the boot
+  self-test and the restore is immediately overridden by `rf69_config_916()`.
+- **`cmd_update_reg` cannot reach RFM69 registers.** Only 0x02/0x09/0x0A/0x0B/0x0C
+  are handled, so Listen Mode cannot be swept over BLE without a firmware change. A
+  debug-only raw register command behind a Kconfig would make that experiment cheap.

@@ -31,13 +31,39 @@ config ORANGELINK_RFM69_HW
 
 endchoice
 
-config ORANGELINK_RFM69_TX_POWER
-	int "RFM69 output power setting (0-31)"
-	default 31
-	range 0 31
+choice ORANGELINK_RFM69_HW_PA
+	prompt "PA stage to drive on RFM69HW/HCW"
+	depends on ORANGELINK_RFM69_HW
+	default ORANGELINK_RFM69_HW_PA1_PA2
 	help
-	  OutputPower field of RegPaLevel. On RFM69W, Pout = -18 + value dBm.
-	  On RFM69HW/HCW with PA1+PA2, Pout = -14 + value dBm.
+	  Which PA_BOOST stage to enable. Both drive the same pin, so this does
+	  not change the antenna path or the module's matching network -- only
+	  how much bias current is burned to reach a given output power.
+
+config ORANGELINK_RFM69_HW_PA1
+	bool "PA1 only (-2 to +13 dBm)"
+	help
+	  One stage. Pout = -18 + OutputPower -- the same law the RFM69W's PA0
+	  uses, so this reproduces the legacy Orangelink's operating point on the
+	  pin an HCW actually bonds to the antenna.
+
+config ORANGELINK_RFM69_HW_PA1_PA2
+	bool "PA1 + PA2 (+2 to +17 dBm)"
+	help
+	  Two stages. Pout = -14 + OutputPower. Required above +13 dBm, but it
+	  carries roughly 60 mA of fixed bias whatever the output level, so below
+	  +13 dBm it costs current for nothing. Datasheet Table 10.
+
+endchoice
+
+config ORANGELINK_RFM69_TX_DBM
+	int "RFM69 output power (dBm)"
+	default 13
+	range -18 17
+	help
+	  Target output power at the antenna. The OutputPower field of RegPaLevel
+	  is derived from this and the PA stage above, so switching stage does not
+	  change what leaves the antenna -- only the current it costs.
 
 config ORANGELINK_TX_LEGACY_TRUNCATE
 	bool "Transmit like the legacy firmware (fixed 255-byte frame, truncated)"

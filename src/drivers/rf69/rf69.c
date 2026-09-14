@@ -260,20 +260,61 @@ static const uint8_t rf69_cfg_916[][2] = {
  * silently wrong for an RFM69HW/HCW, where PA0 is not bonded to the antenna and
  * nothing radiates. The variant cannot be detected -- both report VERSION 0x24 --
  * so it is a build-time choice. See Kconfig.
+ *
+ * On an HCW there is a second choice: PA1 alone, or PA1+PA2. Both drive the
+ * PA_BOOST pin and both reach +13 dBm, so neither changes the antenna path.
+ *
+ * PA1 alone looks like it should be much cheaper. Fitting the datasheet's two
+ * PA_BOOST current figures (Table 4: +17 dBm/95 mA, +20 dBm/130 mA) gives ~43%
+ * marginal efficiency over ~60 mA of fixed bias, predicting 74 mA for +13 dBm on two
+ * stages against ~45 mA on one. That fit is invalid -- +20 dBm requires the
+ * high-power TESTPA registers, so the two points are in different operating modes
+ * and do not lie on one curve.
+ *
+ * Measured instead, multimeter in series with the battery, 201-frame wake bursts:
+ *
+ *     PA1+PA2, OutputPower 27   33 mA
+ *     PA1 only, OutputPower 31  31 mA
+ *
+ * Both +13 dBm, both 12/12 pump replies. PA1 alone wins by 6%, not 40% -- about 0.2
+ * days out of 8 -- and forfeits all headroom above +13 dBm, since PA1 tops out there.
+ * Two stages therefore stay the default. The choice is kept because it is a measured
+ * result worth preserving, and because PA1-only is the honest setting if output ever
+ * needs capping at +13 dBm by construction.
+ *
+ * For scale, from the same session: idle < 150 uA, receive 17 mA against a 16 mA
+ * datasheet figure. Receive is ~60% of radio energy and transmit ~38%, so RX duty
+ * cycling is the lever that matters, not the PA stage.
+ *
+ * Power is expressed in dBm and the OutputPower field derived, so that switching
+ * stage cannot silently change what leaves the antenna.
  */
 static int rf69_set_pa(void)
 {
 	uint8_t pa;
+	int out;
 
-#if defined(CONFIG_ORANGELINK_RFM69_HW)
-	/* PA1 + PA2, PA0 off. Pout = -14 + power. */
-	pa = 0x60 | (CONFIG_ORANGELINK_RFM69_TX_POWER & 0x1F);
+#if defined(CONFIG_ORANGELINK_RFM69_HW_PA1_PA2)
+	/* PA1 + PA2 on PA_BOOST. Pout = -14 + OutputPower. */
+	pa = 0x60;
+	out = CONFIG_ORANGELINK_RFM69_TX_DBM + 14;
+#elif defined(CONFIG_ORANGELINK_RFM69_HW)
+	/* PA1 alone on PA_BOOST. Pout = -18 + OutputPower. */
+	pa = 0x40;
+	out = CONFIG_ORANGELINK_RFM69_TX_DBM + 18;
 #else
-	/* PA0 only. Pout = -18 + power. */
-	pa = 0x80 | (CONFIG_ORANGELINK_RFM69_TX_POWER & 0x1F);
+	/* PA0 on RFIO. Pout = -18 + OutputPower. */
+	pa = 0x80;
+	out = CONFIG_ORANGELINK_RFM69_TX_DBM + 18;
 #endif
 
-	return rf69_write_reg(REG_PALEVEL, pa);
+	if (out < 0) {
+		out = 0;
+	} else if (out > 31) {
+		out = 31;
+	}
+
+	return rf69_write_reg(REG_PALEVEL, pa | (uint8_t)out);
 }
 
 int rf69_config_916(void)
