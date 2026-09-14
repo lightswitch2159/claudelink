@@ -89,7 +89,7 @@ config ORANGELINK_BUTTONLESS_DFU
 
 config ORANGELINK_RFM69_LISTEN
 	bool "Duty-cycle the receiver with RFM69 Listen Mode"
-	default n
+	default y
 	help
 	  AndroidAPS chooses how LONG we listen -- the timeout arrives in the
 	  command -- but not what the radio does during that window. By default
@@ -104,9 +104,19 @@ config ORANGELINK_RFM69_LISTEN
 
 	  A HackRF capture of a live exchange measured the pump's reply preamble at
 	  >= 91 bits (~5.55 ms), against the 16 bytes (7.81 ms) we transmit. The
-	  defaults below leave margin against that, but it is one pump on one bench
-	  -- sweep ORANGELINK_RFM69_LISTEN_IDLE_US upward and watch the reply rate
-	  before trusting it. See MIGRATION_NOTES.md section 21.
+	  defaults below leave margin against that.
+
+	  On by default. The obvious worry -- that the preamble was measured from one
+	  pump -- does not hold: the Medtronic PHY is common across models, which is
+	  why ps2/subg_rfspy carries a single CC1101 register set for every pump
+	  AndroidAPS and Loop support, and why the legacy Orangelink firmware had one
+	  916 MHz table rather than one per model. Measured 17 mA -> 5.5 mA receive,
+	  and a full night of live AAPS traffic drew 2% of an 1800 mAh cell where the
+	  old continuous-receive path would have taken that in under four hours.
+
+	  If replies are ever missed, sweep ORANGELINK_RFM69_LISTEN_IDLE_US downward
+	  -- the failure mode is a stretched idle period sleeping through the reply
+	  preamble. See MIGRATION_NOTES.md section 21.
 
 config ORANGELINK_RFM69_LISTEN_IDLE_US
 	int "Listen Mode idle duration (us)"

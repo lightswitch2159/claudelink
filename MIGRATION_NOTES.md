@@ -2226,10 +2226,22 @@ sync.
   (`ListenEnd = 00` having stopped Listen mode). In a noisy environment the
   saving degrades toward continuous RX; the packet still arrives.
 
-  **Still default n**, for one reason only: the idle period is sized against a
-  preamble measured from one pump on one bench. Sweep `LISTEN_IDLE_US` upward
-  until replies start dropping to find the real margin before trusting it on any
-  other hardware.
+  **Now on by default.** The reservation was that the preamble came from one pump
+  on one bench -- but the Medtronic PHY is common across models, which is why
+  `ps2/subg_rfspy` carries a single CC1101 register set for every pump AndroidAPS
+  and Loop support, and why the legacy Orangelink firmware had one 916 MHz table
+  rather than one per model. If the PHY varied by model, that ecosystem could not
+  work at all.
+
+  Corroborated in use rather than only on the bench: a full night of live AAPS
+  traffic took the cell from 78% to 76%, i.e. 36 mAh. At the old continuous-receive
+  figure of 9.4 mA that charge would have gone in 3 h 50 m. Elapsed time was not
+  recorded, so the implied average is 6.0 mA over 6 h or 4.5 mA over 8 h, either
+  side of the 5.65 mA predicted.
+
+  The failure mode to watch for is a stretched idle period sleeping through the
+  reply preamble, which costs a reply and shows up only as an AAPS retry. If that
+  ever appears, sweep `LISTEN_IDLE_US` downward.
 - **BLE drops during sustained wake bursts.** Seen in most soak runs. This would
   appear to AAPS as exactly the stalled commands visible in the captured logs.
 - **Battery percentage is fiction when no cell is fitted.** With the cell removed the
