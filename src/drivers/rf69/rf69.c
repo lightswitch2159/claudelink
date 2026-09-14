@@ -351,6 +351,33 @@ int rf69_listen_start(void)
 		return err;
 	}
 
+	/*
+	 * Recalibrate the low-power RC oscillator before every listen window.
+	 *
+	 * Datasheet 4.3.5: "All timings of the Listen Mode rely on the accuracy of
+	 * the internal low-power RC oscillator", and that oscillator is calibrated
+	 * only at power-up. This device stays powered for weeks, so nothing would
+	 * otherwise correct for temperature drift -- and drift here is silent and
+	 * one-sided: a stretched idle period sleeps through the pump's preamble and
+	 * the reply is simply missed, with no error anywhere to show for it.
+	 *
+	 * The cost is a few hundred microseconds against listen windows of 1.25 to
+	 * 25 seconds, so it is done unconditionally rather than on a timer.
+	 */
+	err = rf69_write_reg(REG_OSC1, RF_OSC1_RCCAL_START);
+	if (err) {
+		return err;
+	}
+	for (int i = 0; i < 50; i++) {
+		uint8_t osc1;
+
+		if (rf69_read_reg(REG_OSC1, &osc1) == 0 &&
+		    (osc1 & RF_OSC1_RCCAL_DONE)) {
+			break;
+		}
+		k_sleep(K_USEC(100));
+	}
+
 	err = rf69_write_reg(REG_LISTEN1, RF_LISTEN1_RESOL_IDLE_64 |
 					  RF_LISTEN1_RESOL_RX_64 |
 					  RF_LISTEN1_CRITERIA_RSSI |
